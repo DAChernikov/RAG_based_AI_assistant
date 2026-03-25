@@ -1,0 +1,81 @@
+services:
+  - type: web
+    name: rag-ai-assistant-api
+    runtime: docker
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./infra/api.Dockerfile
+    healthCheckPath: /ready
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: LOG_LEVEL
+        value: INFO
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: API_PORT
+        value: 8000
+      - key: ARTIFACTS_DIR
+        value: /app/artifacts
+      - key: FORCE_ARTIFACTS_DOWNLOAD
+        value: "false"
+      - key: DEFAULT_MODE
+        value: rag
+      - key: TOP_K
+        value: "5"
+      - key: MAX_NEW_TOKENS
+        value: "220"
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: LLM_MODEL
+        value: gemini-2.5-flash
+      - key: LLM_TEMPERATURE
+        value: "0.2"
+      - key: LLM_MAX_CONTEXT_CHARS
+        value: "12000"
+      - key: REQUEST_TIMEOUT
+        value: "60"
+      - key: STREAM_EDIT_INTERVAL_SEC
+        value: "1.0"
+      - key: STREAM_MIN_CHARS_DELTA
+        value: "40"
+
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ARTIFACT_KEY
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_DEFAULT_REGION
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+
+  - type: worker
+    name: rag-ai-assistant-bot
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    dockerfilePath: ./infra/bot.Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: LOG_LEVEL
+        value: INFO
+      - key: API_BASE_URL
+        value: https://rag-ai-assistant-api.onrender.com
+      - key: REQUEST_TIMEOUT
+        value: "60"
+      - key: STREAM_EDIT_INTERVAL_SEC
+        value: "1.0"
+      - key: STREAM_MIN_CHARS_DELTA
+        value: "40"
+
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
