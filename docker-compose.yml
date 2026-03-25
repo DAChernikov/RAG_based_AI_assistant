@@ -1,0 +1,24 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    container_name: rag_api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: infra/bot.Dockerfile
+    container_name: rag_bot
+    env_file:
+      - .env
+    depends_on:
+      - api
+    restart: unless-stopped

@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+ENV POETRY_VERSION=2.1.4 \
+    POETRY_NO_INTERACTION=1 \
+    POETRY_VIRTUALENVS_CREATE=false \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
+
+COPY pyproject.toml poetry.lock README.md /app/
+RUN poetry install --only main
+
+COPY app /app/app
+COPY .env.example /app/.env.example
+
+RUN mkdir -p /app/artifacts
+
+CMD ["python", "-m", "uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
