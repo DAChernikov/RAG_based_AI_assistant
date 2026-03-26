@@ -15,7 +15,7 @@ services:
       - key: API_HOST
         value: 0.0.0.0
       - key: API_PORT
-        value: 8000
+        value: "8000"
       - key: ARTIFACTS_DIR
         value: /app/artifacts
       - key: FORCE_ARTIFACTS_DOWNLOAD
@@ -68,14 +68,13 @@ services:
         value: prod
       - key: LOG_LEVEL
         value: INFO
-      - key: API_BASE_URL
-        value: https://rag-ai-assistant-api.onrender.com
       - key: REQUEST_TIMEOUT
         value: "60"
       - key: STREAM_EDIT_INTERVAL_SEC
         value: "1.0"
       - key: STREAM_MIN_CHARS_DELTA
         value: "40"
-
+      - key: API_BASE_URL
+        value: https://rag-ai-assistant-api.onrender.com
       - key: TELEGRAM_BOT_TOKEN
         sync: false
