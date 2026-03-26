@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import AsyncIterator
 
@@ -7,6 +8,8 @@ from app.api.config import settings
 
 
 class LLMService:
+    RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
     def __init__(self):
         self.provider = settings.llm_provider
         self.model = settings.llm_model
@@ -27,32 +30,35 @@ class LLMService:
                     texts.append(text)
         return "".join(texts).strip()
 
-    async def generate(
-        self,
-        *,
-        prompt: str,
-        max_new_tokens: int,
-        temperature: float | None = None,
-    ) -> str:
-        if not self.is_configured():
-            raise RuntimeError("LLM is not configured.")
+    @staticmethod
+    def _extract_delta(previous_text: str, current_text: str) -> str:
+        if not current_text:
+            return ""
 
-        temperature = settings.llm_temperature if temperature is None else temperature
+        if current_text.startswith(previous_text):
+            return current_text[len(previous_text) :]
 
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent?key={self.api_key}"
-        )
+        if previous_text.startswith(current_text):
+            return ""
 
-        body = {
+        common_len = 0
+        for prev_char, curr_char in zip(previous_text, current_text):
+            if prev_char != curr_char:
+                break
+            common_len += 1
+
+        delta = current_text[common_len:]
+        return delta if delta else current_text
+
+    def _build_body(self, prompt: str, max_new_tokens: int, temperature: float) -> dict:
+        return {
             "systemInstruction": {
                 "parts": [
                     {
                         "text": (
-                            "You are a helpful RAG assistant. "
-                            "Answer strictly from the provided context. "
-                            "If the answer is not grounded in the context, say so explicitly. "
-                            "Be concise and useful."
+                            "You are a reliable RAG assistant. "
+                            "Stay grounded in the supplied context. "
+                            "Be concise, useful, and technical."
                         )
                     }
                 ]
@@ -64,12 +70,51 @@ class LLMService:
             },
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(url, json=body)
-            response.raise_for_status()
-            payload = response.json()
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float | None = None,
+    ) -> str:
+        if not self.is_configured():
+            raise RuntimeError("LLM is not configured.")
 
-        return self._extract_text_from_gemini_payload(payload)
+        temperature = settings.llm_temperature if temperature is None else temperature
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:generateContent?key={self.api_key}"
+        )
+        body = self._build_body(prompt, max_new_tokens, temperature)
+
+        last_error: Exception | None = None
+
+        for attempt in range(settings.llm_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(url, json=body)
+
+                if (
+                    response.status_code in self.RETRYABLE_STATUSES
+                    and attempt < settings.llm_retries
+                ):
+                    await asyncio.sleep(settings.llm_retry_backoff_sec * (attempt + 1))
+                    continue
+
+                response.raise_for_status()
+                payload = response.json()
+                return self._extract_text_from_gemini_payload(payload)
+
+            except (httpx.HTTPError, httpx.TimeoutException) as exc:
+                last_error = exc
+                if attempt >= settings.llm_retries:
+                    break
+                await asyncio.sleep(settings.llm_retry_backoff_sec * (attempt + 1))
+
+        if last_error:
+            raise RuntimeError(f"LLM request failed: {last_error}") from last_error
+
+        return ""
 
     async def stream_generate(
         self,
@@ -82,42 +127,24 @@ class LLMService:
             raise RuntimeError("LLM is not configured.")
 
         temperature = settings.llm_temperature if temperature is None else temperature
-
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:streamGenerateContent?alt=sse&key={self.api_key}"
         )
-
-        body = {
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": (
-                            "You are a helpful RAG assistant. "
-                            "Answer strictly from the provided context. "
-                            "If the answer is not grounded in the context, say so explicitly. "
-                            "Be concise and useful."
-                        )
-                    }
-                ]
-            },
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_new_tokens,
-            },
-        }
+        body = self._build_body(prompt, max_new_tokens, temperature)
 
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=body) as response:
                 response.raise_for_status()
+
+                emitted_text = ""
 
                 async for line in response.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
 
                     raw = line[len("data:") :].strip()
-                    if not raw:
+                    if not raw or raw == "[DONE]":
                         continue
 
                     try:
@@ -125,6 +152,8 @@ class LLMService:
                     except json.JSONDecodeError:
                         continue
 
-                    chunk = self._extract_text_from_gemini_payload(payload)
-                    if chunk:
-                        yield chunk
+                    current_text = self._extract_text_from_gemini_payload(payload)
+                    delta = self._extract_delta(emitted_text, current_text)
+                    if delta:
+                        emitted_text += delta
+                        yield delta

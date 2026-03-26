@@ -3,10 +3,15 @@ from app.api.config import settings
 
 class PromptBuilder:
     @staticmethod
-    def build(question: str, retrieved: list[dict]) -> str:
+    def build(question: str, retrieved: list[dict], mode: str) -> str:
+        if mode == "rag_code":
+            return PromptBuilder._build_code_prompt(question, retrieved)
+        return PromptBuilder._build_docs_prompt(question, retrieved)
+
+    @staticmethod
+    def _build_context(retrieved: list[dict], max_chars: int) -> str:
         blocks: list[str] = []
-        total = 0
-        limit = settings.llm_max_context_chars
+        used = 0
 
         for idx, item in enumerate(retrieved, start=1):
             title = item.get("title") or item.get("doc_id") or f"doc_{idx}"
@@ -19,20 +24,51 @@ class PromptBuilder:
                 f"title: {title}\n"
                 f"source: {source}\n"
                 f"score: {score:.4f}\n"
-                f"text:\n{text}\n"
+                f"content:\n{text}\n"
             )
 
-            if total + len(block) > limit:
+            if used + len(block) > max_chars:
                 break
 
             blocks.append(block)
-            total += len(block)
+            used += len(block)
 
-        context = "\n\n".join(blocks)
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _build_docs_prompt(question: str, retrieved: list[dict]) -> str:
+        context = PromptBuilder._build_context(retrieved, settings.llm_max_context_chars)
 
         return (
-            "Use the following retrieved context to answer the question.\n"
-            "Cite the answer implicitly from the context, but do not invent facts.\n\n"
+            "You are a concise technical assistant.\n"
+            "Answer only from the provided context.\n"
+            "If the context is relevant but incomplete, "
+            "give the safest grounded answer.\n"
+            "Only say that the context is insufficient "
+            "if the retrieved sources are clearly unrelated.\n"
+            "If the user asks 'how to', provide a short step-by-step answer "
+            "or a minimal example.\n"
+            "Do not use markdown code fences.\n\n"
+            f"QUESTION:\n{question}\n\n"
+            f"CONTEXT:\n{context}\n\n"
+            "ANSWER:"
+        )
+
+    @staticmethod
+    def _build_code_prompt(question: str, retrieved: list[dict]) -> str:
+        context = PromptBuilder._build_context(retrieved, settings.llm_max_context_chars)
+
+        return (
+            "You are a Python and data-engineering code assistant.\n"
+            "The retrieved context may contain code snippets "
+            "with little or no prose.\n"
+            "Infer the answer from code, API names, function names, "
+            "and surrounding text.\n"
+            "If the snippets are relevant, explain the pattern "
+            "in plain English and give one short grounded example.\n"
+            "Do not say the context is missing "
+            "if there is obviously relevant code.\n"
+            "Do not use markdown code fences.\n\n"
             f"QUESTION:\n{question}\n\n"
             f"CONTEXT:\n{context}\n\n"
             "ANSWER:"

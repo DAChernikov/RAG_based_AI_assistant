@@ -94,7 +94,8 @@ class ArtifactManager:
 
     def _normalize_single_nested_root(self) -> None:
         entries = [
-            p for p in self.artifacts_dir.iterdir()
+            p
+            for p in self.artifacts_dir.iterdir()
             if p.name not in {"__MACOSX"} and not p.name.startswith("._")
         ]
 

@@ -67,7 +67,7 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
     mode = router_service.route(payload.question, payload.mode or settings.default_mode)
 
     if mode == "sql":
-        raise HTTPException(status_code=400, detail="Streaming is supported only for rag mode.")
+        raise HTTPException(status_code=400, detail="Streaming is supported only for RAG modes.")
 
     rag_service = runtime.get("rag_service")
     if rag_service is None:
@@ -88,15 +88,21 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
 
     async def event_generator():
         yield f"data: {json.dumps({'type': 'meta', 'data': meta}, ensure_ascii=False)}\n\n"
-        full_text = ""
 
         try:
+            full_text = ""
             async for chunk in stream:
                 full_text += chunk
-                yield f"data: {json.dumps({'type': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
+                yield (
+                    f"data: {json.dumps({'type': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
+                )
 
-            yield f"data: {json.dumps({'type': 'done', 'data': full_text}, ensure_ascii=False)}\n\n"
+            yield (
+                f"data: {json.dumps({'type': 'done', 'data': full_text}, ensure_ascii=False)}\n\n"
+            )
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
+            yield (
+                f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
+            )
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

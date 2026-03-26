@@ -24,13 +24,20 @@ class Settings(BaseSettings):
 
     default_mode: str = "rag"
     top_k: int = 5
-    max_new_tokens: int = 220
+    doc_top_k: int = 5
+    code_top_k: int = 3
+    max_new_tokens: int = 320
+
+    min_confident_code_score: float = 0.58
+    min_confident_doc_score: float = 0.45
 
     llm_provider: str = "gemini"
     llm_model: str = "gemini-2.5-flash"
     llm_api_key: str | None = None
-    llm_temperature: float = 0.2
+    llm_temperature: float = 0.15
     llm_max_context_chars: int = 12000
+    llm_retries: int = 2
+    llm_retry_backoff_sec: float = 2.0
 
     request_timeout: float = 60.0
     stream_edit_interval_sec: float = 1.0
