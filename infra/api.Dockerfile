@@ -12,6 +12,11 @@ RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
 COPY pyproject.toml poetry.lock README.md /app/
 RUN poetry install --only api
 
+# CPU-only torch ставим отдельно, чтобы не ломать lock на macOS
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.9.0
+
 COPY app /app/app
 COPY .env.example /app/.env.example
 
