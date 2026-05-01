@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -11,21 +14,40 @@ class APIClient:
         self.base_url = bot_settings.api_base_url.rstrip("/")
         self.timeout = bot_settings.request_timeout
 
-    async def ask(self, question: str) -> dict:
+    async def ask(
+        self,
+        question: str,
+        mode: str | None = None,
+        top_k: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"question": question}
+        if mode:
+            payload["mode"] = mode
+        if top_k is not None:
+            payload["top_k"] = top_k
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/ask",
-                json={"question": question},
-            )
+            response = await client.post(f"{self.base_url}/ask", json=payload)
             response.raise_for_status()
             return response.json()
 
-    async def ask_stream(self, question: str) -> AsyncIterator[dict]:
+    async def ask_stream(
+        self,
+        question: str,
+        mode: str | None = None,
+        top_k: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        payload: dict[str, Any] = {"question": question}
+        if mode:
+            payload["mode"] = mode
+        if top_k is not None:
+            payload["top_k"] = top_k
+
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/ask/stream",
-                json={"question": question},
+                json=payload,
                 headers={"Accept": "text/event-stream"},
             ) as response:
                 response.raise_for_status()
@@ -35,7 +57,7 @@ class APIClient:
                         continue
 
                     raw = line[len("data:") :].strip()
-                    if not raw:
+                    if not raw or raw == "[DONE]":
                         continue
 
                     try:
@@ -43,7 +65,7 @@ class APIClient:
                     except json.JSONDecodeError:
                         continue
 
-    async def ready(self) -> dict:
+    async def ready(self) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(f"{self.base_url}/ready")
             response.raise_for_status()

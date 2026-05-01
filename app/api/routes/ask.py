@@ -81,7 +81,36 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
     mode = router_service.route(payload.question, payload.mode or settings.default_mode)
 
     if mode == "sql":
-        raise HTTPException(status_code=400, detail="Streaming is supported only for RAG modes.")
+        retriever = runtime.get("retriever")
+        llm_service = runtime.get("llm_service")
+        if retriever is None or llm_service is None:
+            startup_error = runtime.get("startup_error")
+            detail = startup_error or "Retriever or LLM service is not initialized."
+            raise HTTPException(status_code=503, detail=detail)
+
+        sql_service = SQLService(retriever=retriever, llm_service=llm_service)
+        try:
+            result = await sql_service.ask(
+                question=payload.question,
+                top_k=payload.top_k or settings.sql_top_k,
+                max_new_tokens=payload.max_new_tokens or settings.max_new_tokens,
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"SQL generation failed: {exc}") from exc
+
+        async def sql_event_generator():
+            meta = {
+                "mode": result.get("mode", "sql"),
+                "confidence": result.get("confidence"),
+                "retrieved": result.get("retrieved", []),
+            }
+            yield f"data: {json.dumps({'type': 'meta', 'data': meta}, ensure_ascii=False)}\n\n"
+            yield (
+                f"data: {json.dumps({'type': 'done', 'data': result.get('answer', '')}, ensure_ascii=False)}\n\n"
+            )
+
+        return StreamingResponse(sql_event_generator(), media_type="text/event-stream")
 
     rag_service = runtime.get("rag_service")
     if rag_service is None:

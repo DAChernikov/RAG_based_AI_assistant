@@ -22,6 +22,8 @@ class SQLValidationResult:
     sql: str | None
     used_tables: list[str]
     allowed_tables: list[str]
+    used_columns: list[str]
+    allowed_columns: list[str]
     explain_checked: bool = False
     explain_error: str | None = None
 
@@ -33,6 +35,8 @@ class SQLValidationResult:
             "sql": self.sql,
             "used_tables": self.used_tables,
             "allowed_tables": self.allowed_tables,
+            "used_columns": self.used_columns,
+            "allowed_columns": self.allowed_columns,
             "explain_checked": self.explain_checked,
             "explain_error": self.explain_error,
         }
@@ -54,11 +58,29 @@ class SQLService:
         "call",
     )
 
+    SQL_ALIAS_STOPWORDS = {
+        "on",
+        "where",
+        "join",
+        "left",
+        "right",
+        "inner",
+        "outer",
+        "full",
+        "cross",
+        "group",
+        "order",
+        "limit",
+        "having",
+        "union",
+    }
+
     TABLE_PATTERN = re.compile(
-        r"\b(?:from|join)\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)",
+        r"\b(?:from|join)\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)"
+        r"(?:\s+(?:as\s+)?([a-zA-Z_][\w]*))?",
         flags=re.IGNORECASE,
     )
-
+    COLUMN_REF_PATTERN = re.compile(r"\b([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)\b")
     CODE_FENCE_PATTERN = re.compile(r"```(?:sql)?\s*(.*?)```", flags=re.IGNORECASE | re.DOTALL)
 
     def __init__(self, retriever, llm_service):
@@ -108,7 +130,6 @@ class SQLService:
             )[0]
             return cls._strip_trailing_semicolon(candidate)
 
-        # Fallback: take text starting at SELECT/WITH.
         match = re.search(r"\b(select|with)\b", answer, flags=re.IGNORECASE)
         if match:
             return cls._strip_trailing_semicolon(answer[match.start() :])
@@ -116,20 +137,64 @@ class SQLService:
         return None
 
     @staticmethod
-    def _normalize_table_name(name: str) -> str:
+    def _normalize_identifier(name: str) -> str:
         return name.strip().strip('"').lower()
 
     @classmethod
-    def extract_used_tables(cls, sql_text: str | None) -> list[str]:
+    def extract_table_refs(cls, sql_text: str | None) -> tuple[list[str], dict[str, str]]:
         if not sql_text:
-            return []
+            return [], {}
 
         tables: list[str] = []
+        aliases: dict[str, str] = {}
+
         for match in cls.TABLE_PATTERN.finditer(sql_text):
-            table = cls._normalize_table_name(match.group(1))
+            table = cls._normalize_identifier(match.group(1))
+            alias = match.group(2)
+
             if table not in tables:
                 tables.append(table)
+
+            short_table = table.split(".")[-1]
+            aliases[short_table] = table
+            aliases[table] = table
+
+            if alias:
+                normalized_alias = cls._normalize_identifier(alias)
+                if normalized_alias not in cls.SQL_ALIAS_STOPWORDS:
+                    aliases[normalized_alias] = table
+
+        return tables, aliases
+
+    @classmethod
+    def extract_used_tables(cls, sql_text: str | None) -> list[str]:
+        tables, _ = cls.extract_table_refs(sql_text)
         return tables
+
+    @staticmethod
+    def _table_metadata_from_docs(schema_docs: list[dict]) -> dict[str, set[str]]:
+        table_to_columns: dict[str, set[str]] = {}
+
+        for doc in schema_docs:
+            title = (doc.get("title") or "").strip().lower()
+            metadata = doc.get("metadata") or {}
+            schema = str(metadata.get("schema") or "").strip().lower()
+            table = str(metadata.get("table") or "").strip().lower()
+            columns = {str(col).strip().lower() for col in metadata.get("columns") or []}
+
+            candidates = set()
+            if title:
+                candidates.add(title)
+                candidates.add(title.split(".")[-1])
+            if schema and table:
+                candidates.add(f"{schema}.{table}")
+                candidates.add(table)
+
+            for candidate in candidates:
+                if candidate:
+                    table_to_columns[candidate] = set(columns)
+
+        return table_to_columns
 
     @staticmethod
     def _allowed_tables_from_docs(schema_docs: list[dict]) -> list[str]:
@@ -154,6 +219,52 @@ class SQLService:
                     allowed.append(normalized)
 
         return allowed
+
+    @staticmethod
+    def _allowed_columns_from_docs(schema_docs: list[dict]) -> list[str]:
+        allowed: list[str] = []
+
+        for doc in schema_docs:
+            metadata = doc.get("metadata") or {}
+            schema = str(metadata.get("schema") or "").strip().lower()
+            table = str(metadata.get("table") or "").strip().lower()
+            columns = metadata.get("columns") or []
+
+            for column in columns:
+                column = str(column).strip().lower()
+                if not column:
+                    continue
+                candidates = [f"{table}.{column}"] if table else []
+                if schema and table:
+                    candidates.append(f"{schema}.{table}.{column}")
+                for candidate in candidates:
+                    if candidate not in allowed:
+                        allowed.append(candidate)
+
+        return allowed
+
+    @classmethod
+    def extract_used_columns(
+        cls, sql_text: str | None, alias_to_table: dict[str, str]
+    ) -> list[str]:
+        if not sql_text:
+            return []
+
+        used: list[str] = []
+        for qualifier, column in cls.COLUMN_REF_PATTERN.findall(sql_text):
+            qualifier = cls._normalize_identifier(qualifier)
+            column = cls._normalize_identifier(column)
+            table = alias_to_table.get(qualifier, qualifier)
+
+            # Skip schema.table references in FROM/JOIN. They are table refs, not column refs.
+            if f"{qualifier}.{column}" in alias_to_table:
+                continue
+
+            full_name = f"{table}.{column}"
+            if full_name not in used:
+                used.append(full_name)
+
+        return used
 
     @staticmethod
     def _has_forbidden_keyword(sql_text: str) -> str | None:
@@ -204,11 +315,23 @@ class SQLService:
 
         sql_text = self.extract_sql(answer)
         allowed_tables = self._allowed_tables_from_docs(schema_docs)
-        used_tables = self.extract_used_tables(sql_text)
+        allowed_columns = self._allowed_columns_from_docs(schema_docs)
+        table_to_columns = self._table_metadata_from_docs(schema_docs)
+        used_tables, alias_to_table = self.extract_table_refs(sql_text)
+        used_columns = self.extract_used_columns(sql_text, alias_to_table)
 
         if not sql_text:
             errors.append("No SQL query was found in the LLM answer.")
-            return SQLValidationResult(False, errors, warnings, None, [], allowed_tables)
+            return SQLValidationResult(
+                False,
+                errors,
+                warnings,
+                None,
+                [],
+                allowed_tables,
+                [],
+                allowed_columns,
+            )
 
         first_token = sql_text.lstrip().split(maxsplit=1)[0].lower() if sql_text.strip() else ""
         if first_token not in {"select", "with"}:
@@ -231,6 +354,19 @@ class SQLService:
                 + ", ".join(unknown_tables)
             )
 
+        invalid_columns: list[str] = []
+        for used_column in used_columns:
+            table, column = used_column.rsplit(".", 1)
+            columns = table_to_columns.get(table) or table_to_columns.get(table.split(".")[-1])
+            if columns is not None and column not in columns:
+                invalid_columns.append(used_column)
+
+        if invalid_columns:
+            errors.append(
+                "SQL references columns that are not present in retrieved schema context: "
+                + ", ".join(invalid_columns)
+            )
+
         explain_checked = False
         explain_error = None
         if not errors and settings.sql_enable_explain_validation:
@@ -245,6 +381,8 @@ class SQLService:
             sql=sql_text,
             used_tables=used_tables,
             allowed_tables=allowed_tables,
+            used_columns=used_columns,
+            allowed_columns=allowed_columns,
             explain_checked=explain_checked,
             explain_error=explain_error,
         )
@@ -303,6 +441,8 @@ class SQLService:
                 sql=None,
                 used_tables=[],
                 allowed_tables=[],
+                used_columns=[],
+                allowed_columns=[],
             )
             return {
                 "question": question,
@@ -321,6 +461,8 @@ class SQLService:
                 sql=None,
                 used_tables=[],
                 allowed_tables=self._allowed_tables_from_docs(retrieved),
+                used_columns=[],
+                allowed_columns=self._allowed_columns_from_docs(retrieved),
             )
         else:
             answer = await self._generate_once(question, retrieved, effective_max_tokens)

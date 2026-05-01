@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import random
 import time
+from typing import Any
 
+import httpx
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.error import EndPointNotFound, TelegramError
@@ -19,7 +23,41 @@ def _truncate(text: str, limit: int = 3900) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
-def _build_final_text(answer: str, meta: dict | None) -> str:
+def _format_score(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
+
+
+def _format_validation(confidence: dict[str, Any]) -> list[str]:
+    validation = confidence.get("validation")
+    if not isinstance(validation, dict):
+        return []
+
+    lines = [f"- sql_valid: {validation.get('is_valid')}"]
+
+    used_tables = validation.get("used_tables") or []
+    if used_tables:
+        lines.append(f"- used_tables: {', '.join(used_tables)}")
+
+    used_columns = validation.get("used_columns") or []
+    if used_columns:
+        joined = ", ".join(used_columns[:8])
+        suffix = "..." if len(used_columns) > 8 else ""
+        lines.append(f"- used_columns: {joined}{suffix}")
+
+    explain_checked = validation.get("explain_checked")
+    if explain_checked is not None:
+        lines.append(f"- explain_checked: {explain_checked}")
+
+    errors = validation.get("errors") or []
+    if errors:
+        lines.append(f"- validation_errors: {len(errors)}")
+
+    return lines
+
+
+def _build_final_text(answer: str, meta: dict[str, Any] | None) -> str:
     lines = [_truncate(answer, limit=2800)]
 
     if meta:
@@ -31,16 +69,14 @@ def _build_final_text(answer: str, meta: dict | None) -> str:
             lines.insert(0, f"Режим: {mode}")
 
         if confidence:
-            lines.extend(
-                [
-                    "",
-                    "Уверенность:",
-                    f"- top1_score: {confidence.get('top1_score')}",
-                    f"- gap12: {confidence.get('gap12')}",
-                    f"- top_k: {confidence.get('top_k')}",
-                    f"- top1_source: {confidence.get('top1_source')}",
-                ]
-            )
+            confidence_lines = ["", "Уверенность:"]
+
+            for key in ["top1_score", "gap12", "top_k", "sql_top_k", "top1_source"]:
+                if confidence.get(key) is not None:
+                    confidence_lines.append(f"- {key}: {_format_score(confidence.get(key))}")
+
+            confidence_lines.extend(_format_validation(confidence))
+            lines.extend(confidence_lines)
 
         if retrieved:
             lines.append("")
@@ -49,7 +85,10 @@ def _build_final_text(answer: str, meta: dict | None) -> str:
                 title = item.get("title") or item.get("doc_id")
                 score = item.get("score", 0.0)
                 source = item.get("source", "unknown")
-                lines.append(f"- {title} | {source} | score={score:.4f}")
+                if isinstance(score, (int, float)):
+                    lines.append(f"- {title} | {source} | score={score:.4f}")
+                else:
+                    lines.append(f"- {title} | {source}")
 
     return _truncate("\n".join(lines), limit=4000)
 
@@ -99,6 +138,22 @@ async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(text)
     except Exception as exc:
         await update.message.reply_text(f"API error: {exc}")
+
+
+async def _send_non_streaming_answer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    question: str,
+    placeholder_message,
+) -> None:
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    data = await api_client.ask(question=question)
+    final_text = _build_final_text(data.get("answer", ""), data)
+
+    if placeholder_message is not None:
+        await placeholder_message.edit_text(final_text)
+    else:
+        await update.message.reply_text(final_text)
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -194,5 +249,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             await update.message.reply_text(final_text)
 
+    except httpx.HTTPStatusError as exc:
+        # Backward-compatible fallback: older API versions return 400 for SQL streaming.
+        if exc.response.status_code == 400:
+            try:
+                await _send_non_streaming_answer(update, context, question, placeholder_message)
+            except Exception as fallback_exc:
+                await update.message.reply_text(f"API error: {fallback_exc}")
+            return
+
+        await update.message.reply_text(
+            f"API error: {exc}\n"
+            "For more information check: "
+            f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{exc.response.status_code}"
+        )
     except Exception as exc:
         await update.message.reply_text(f"API error: {exc}")

@@ -23,7 +23,11 @@ class DummyRetriever:
                 "text": "TABLE rag_kg.orders\nColumns:\n- customer_id\n- total_amount",
                 "score": 0.9,
                 "raw_score": 0.9,
-                "metadata": {"schema": "rag_kg", "table": "orders"},
+                "metadata": {
+                    "schema": "rag_kg",
+                    "table": "orders",
+                    "columns": ["customer_id", "total_amount"],
+                },
             },
             {
                 "doc_id": "database_schema::rag_kg.customers",
@@ -32,7 +36,11 @@ class DummyRetriever:
                 "text": "TABLE rag_kg.customers\nColumns:\n- customer_id\n- segment",
                 "score": 0.8,
                 "raw_score": 0.8,
-                "metadata": {"schema": "rag_kg", "table": "customers"},
+                "metadata": {
+                    "schema": "rag_kg",
+                    "table": "customers",
+                    "columns": ["customer_id", "segment"],
+                },
             },
         ]
 
