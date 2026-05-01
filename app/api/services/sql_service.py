@@ -396,7 +396,28 @@ class SQLService:
             dialect=settings.sql_dialect,
             max_context_chars=settings.llm_max_context_chars,
         )
-        return await self.llm_service.generate(prompt=prompt, max_new_tokens=max_new_tokens)
+        return await self.llm_service.generate(
+            prompt=prompt,
+            max_new_tokens=max(max_new_tokens, settings.sql_max_new_tokens),
+            temperature=settings.sql_temperature,
+        )
+
+    async def _generate_sql_only_once(
+        self, question: str, schema_docs: list[dict], max_new_tokens: int
+    ) -> str:
+        prompt = SQLPromptBuilder.build_sql_only_prompt(
+            question=question,
+            schema_docs=schema_docs,
+            dialect=settings.sql_dialect,
+            max_context_chars=settings.llm_max_context_chars,
+        )
+        sql_text = await self.llm_service.generate(
+            prompt=prompt,
+            max_new_tokens=max(max_new_tokens, settings.sql_max_new_tokens),
+            temperature=settings.sql_temperature,
+        )
+        sql_text = self._strip_trailing_semicolon(sql_text)
+        return f"EXPLANATION:\nGenerated SQL query for the requested analytical task.\n\nSQL:\n{sql_text}"
 
     async def _repair_once(
         self,
@@ -415,7 +436,11 @@ class SQLService:
             dialect=settings.sql_dialect,
             max_context_chars=settings.llm_max_context_chars,
         )
-        return await self.llm_service.generate(prompt=prompt, max_new_tokens=max_new_tokens)
+        return await self.llm_service.generate(
+            prompt=prompt,
+            max_new_tokens=max(max_new_tokens, settings.sql_max_new_tokens),
+            temperature=settings.sql_temperature,
+        )
 
     async def ask(
         self,
@@ -425,7 +450,7 @@ class SQLService:
         max_new_tokens: int | None = None,
     ) -> dict:
         effective_top_k = top_k or settings.sql_top_k
-        effective_max_tokens = max_new_tokens or settings.max_new_tokens
+        effective_max_tokens = max_new_tokens or settings.sql_max_new_tokens
 
         retrieved = self.retriever.search(
             question,
@@ -468,22 +493,47 @@ class SQLService:
             answer = await self._generate_once(question, retrieved, effective_max_tokens)
             validation = await self.validate_sql(answer, retrieved)
 
+            # First recovery step: if the formatted answer has no extractable SQL, ask for SQL only.
+            if not validation.sql:
+                candidate_answer = await self._generate_sql_only_once(
+                    question, retrieved, effective_max_tokens
+                )
+                candidate_validation = await self.validate_sql(candidate_answer, retrieved)
+                if candidate_validation.sql:
+                    candidate_validation.warnings.append("SQL-only retry used.")
+                    answer = candidate_answer
+                    validation = candidate_validation
+
             attempts = 0
             while (
                 not validation.is_valid
                 and attempts < settings.sql_max_repair_attempts
                 and self.llm_service.is_configured()
             ):
+                previous_answer = answer
+                previous_validation = validation
                 attempts += 1
-                answer = await self._repair_once(
+                candidate_answer = await self._repair_once(
                     question=question,
                     schema_docs=retrieved,
-                    previous_answer=answer,
-                    validation_errors=validation.errors,
+                    previous_answer=previous_answer,
+                    validation_errors=previous_validation.errors,
                     max_new_tokens=effective_max_tokens,
                 )
-                validation = await self.validate_sql(answer, retrieved)
-                validation.warnings.append(f"Repair attempts used: {attempts}")
+                candidate_validation = await self.validate_sql(candidate_answer, retrieved)
+                candidate_validation.warnings.append(f"Repair attempts used: {attempts}")
+
+                # Do not replace an answer that contains SQL with a worse repair that has no SQL.
+                if previous_validation.sql and not candidate_validation.sql:
+                    previous_validation.warnings.append(
+                        f"Repair attempt {attempts} produced no SQL and was ignored."
+                    )
+                    validation = previous_validation
+                    answer = previous_answer
+                    break
+
+                answer = candidate_answer
+                validation = candidate_validation
 
         confidence = self._build_confidence(retrieved, effective_top_k, validation)
 

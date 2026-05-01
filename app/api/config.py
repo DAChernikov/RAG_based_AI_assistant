@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     sql_schema_source: str = "database_schema"
     sql_dialect: str = "postgres"
     sql_max_repair_attempts: int = 1
+    sql_max_new_tokens: int = 700
+    sql_temperature: float = 0.0
     sql_enable_explain_validation: bool = False
     sql_explain_timeout_sec: float = 10.0
 

@@ -44,6 +44,10 @@ services:
         value: postgres
       - key: SQL_MAX_REPAIR_ATTEMPTS
         value: "1"
+      - key: SQL_MAX_NEW_TOKENS
+        value: "700"
+      - key: SQL_TEMPERATURE
+        value: "0.0"
       - key: SQL_ENABLE_EXPLAIN_VALIDATION
         value: "false"
       - key: SQL_EXPLAIN_TIMEOUT_SEC

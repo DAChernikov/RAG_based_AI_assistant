@@ -35,25 +35,27 @@ class SQLPromptBuilder:
         schema_context = cls._format_schema_context(schema_docs, max_chars=max_context_chars)
 
         return f"""
-You are a senior data analyst and SQL generation assistant.
-Generate SQL for the user's analytical question.
+You are a senior data analyst and PostgreSQL generation assistant.
+Generate a valid SQL query for the user's analytical question.
 
-Rules:
+Critical rules:
 - SQL dialect: {dialect}.
 - Use only tables and columns from the provided database schema context.
 - Do not invent table names or column names.
 - Prefer schema-qualified table names, for example rag_kg.orders.
 - Generate only read-only SQL: SELECT or WITH ... SELECT.
-- Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE or CREATE.
-- If the schema context is insufficient, explain what is missing and do not invent SQL.
+- Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE or COPY.
+- Always include a SQL query when the schema context contains the needed tables.
+- Do not answer with phrases like "the previous query".
+- Do not use markdown code fences.
 - Keep the answer concise.
 
-Return exactly this structure:
+Return exactly this structure and nothing else:
 EXPLANATION:
-<short explanation of the query logic>
+<one short sentence explaining the query logic>
 
 SQL:
-<single SQL query>
+<single PostgreSQL SELECT query without markdown fences>
 
 DATABASE SCHEMA CONTEXT:
 {schema_context}
@@ -77,25 +79,26 @@ USER QUESTION:
         errors = "\n".join(f"- {err}" for err in validation_errors)
 
         return f"""
-You generated SQL that failed validation.
-Repair the SQL using only the provided database schema context.
+The previous SQL answer failed validation. Repair it.
 
-Rules:
+Critical rules:
 - SQL dialect: {dialect}.
-- Use only tables and columns from the schema context.
+- Use only tables and columns from the database schema context.
 - Return only read-only SQL: SELECT or WITH ... SELECT.
 - Do not invent missing tables or columns.
-- If the schema is insufficient, explain what is missing.
+- Always include a corrected SQL query when the schema context contains the needed tables.
+- Do not answer with phrases like "the previous query".
+- Do not use markdown code fences.
 
 Validation errors:
 {errors}
 
-Return exactly this structure:
+Return exactly this structure and nothing else:
 EXPLANATION:
-<short explanation of the repaired query>
+<one short sentence explaining the corrected query logic>
 
 SQL:
-<single repaired SQL query>
+<single corrected PostgreSQL SELECT query without markdown fences>
 
 DATABASE SCHEMA CONTEXT:
 {schema_context}
@@ -103,6 +106,36 @@ DATABASE SCHEMA CONTEXT:
 USER QUESTION:
 {question}
 
-PREVIOUS ANSWER:
+FAILED PREVIOUS ANSWER:
 {previous_answer}
+""".strip()
+
+    @classmethod
+    def build_sql_only_prompt(
+        cls,
+        *,
+        question: str,
+        schema_docs: list[dict],
+        dialect: str = "postgres",
+        max_context_chars: int = 12000,
+    ) -> str:
+        schema_context = cls._format_schema_context(schema_docs, max_chars=max_context_chars)
+
+        return f"""
+Generate one valid read-only SQL query for the user's analytical question.
+
+Rules:
+- SQL dialect: {dialect}.
+- Use only tables and columns from the database schema context.
+- Prefer schema-qualified table names, for example rag_kg.orders.
+- Return only the SQL query text.
+- Do not use markdown code fences.
+- Do not add explanations.
+- Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE or COPY.
+
+DATABASE SCHEMA CONTEXT:
+{schema_context}
+
+USER QUESTION:
+{question}
 """.strip()
