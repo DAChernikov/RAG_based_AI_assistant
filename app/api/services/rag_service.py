@@ -58,9 +58,6 @@ class RAGService:
         if "hive" in q or "metastore" in q:
             boosts["hive_docs"] = 0.15
 
-        if any(token in q for token in ("revenue", "campaign", "orders", "refund", "schema")):
-            boosts["neon_schema"] = 0.15
-
         return boosts
 
     def _retrieve(self, question: str, mode: str, top_k: int | None) -> list[dict]:

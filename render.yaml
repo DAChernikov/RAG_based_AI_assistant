@@ -26,6 +26,12 @@ services:
         value: "5"
       - key: MAX_NEW_TOKENS
         value: "220"
+      - key: SQL_TOP_K
+        value: "10"
+      - key: SQL_DIALECT
+        value: postgres
+      - key: SQL_MAX_REPAIR_ATTEMPTS
+        value: "1"
       - key: LLM_PROVIDER
         value: gemini
       - key: LLM_MODEL

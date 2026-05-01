@@ -8,6 +8,7 @@ from app.api.services.artifact_manager import ArtifactManager
 from app.api.services.llm_service import LLMService
 from app.api.services.rag_service import RAGService
 from app.api.services.retriever_loader import RetrieverLoader
+from app.api.services.sql_service import SQLService
 
 
 @asynccontextmanager
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
         "llm_name": settings.llm_model,
         "artifacts_dir": settings.artifacts_dir,
         "rag_service": None,
+        "sql_service": None,
         "startup_error": None,
     }
 
@@ -31,6 +33,7 @@ async def lifespan(app: FastAPI):
             retriever = RetrieverLoader(settings.artifacts_dir).load()
             llm_service = LLMService()
             runtime["rag_service"] = RAGService(retriever=retriever, llm_service=llm_service)
+            runtime["sql_service"] = SQLService(retriever=retriever, llm_service=llm_service)
             runtime["rag_ready"] = True
         else:
             runtime["startup_error"] = "Required artifacts were not found."

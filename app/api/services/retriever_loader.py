@@ -45,22 +45,32 @@ class RetrieverLoader:
         top_k: int = 5,
         preferred_sources: list[str] | None = None,
         source_boosts: dict[str, float] | None = None,
+        source_filter: list[str] | None = None,
     ) -> list[dict]:
         query_emb = self.encode(query)
         raw_scores = self.corpus_emb @ query_emb
         scores = raw_scores.copy()
 
         preferred_sources = set(preferred_sources or [])
+        source_filter_set = set(source_filter or [])
         source_boosts = source_boosts or {}
 
-        if preferred_sources or source_boosts:
-            for idx, doc in enumerate(self.corpus):
-                source = doc.get("source", "unknown")
-                if source in preferred_sources:
-                    scores[idx] += 0.08
-                scores[idx] += source_boosts.get(source, 0.0)
+        candidate_idx: list[int] = []
+        for idx, doc in enumerate(self.corpus):
+            source = doc.get("source", "unknown")
+            if source_filter_set and source not in source_filter_set:
+                continue
 
-        ranked_idx = np.argsort(scores)[::-1]
+            candidate_idx.append(idx)
+
+            if source in preferred_sources:
+                scores[idx] += 0.08
+            scores[idx] += source_boosts.get(source, 0.0)
+
+        if not candidate_idx:
+            return []
+
+        ranked_idx = sorted(candidate_idx, key=lambda idx: scores[idx], reverse=True)
 
         results: list[dict] = []
         seen: set[str] = set()
@@ -78,6 +88,7 @@ class RetrieverLoader:
                     "source": doc.get("source", "unknown"),
                     "title": doc.get("title"),
                     "text": doc.get("text"),
+                    "metadata": doc.get("metadata"),
                     "score": float(scores[idx]),
                     "raw_score": float(raw_scores[idx]),
                 }

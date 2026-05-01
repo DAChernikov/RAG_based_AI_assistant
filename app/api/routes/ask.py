@@ -8,7 +8,6 @@ from app.api.config import settings
 from app.api.dependencies import AppStateError, get_runtime_state
 from app.api.schemas import AskRequest, AskResponse, RetrievedDocument
 from app.api.services.router_service import RouterService
-from app.api.services.sql_service import SQLService
 
 router = APIRouter(tags=["ask"])
 
@@ -16,12 +15,24 @@ router = APIRouter(tags=["ask"])
 @router.post("/ask", response_model=AskResponse)
 async def ask(payload: AskRequest, runtime: dict = Depends(get_runtime_state)) -> AskResponse:
     router_service = RouterService()
-    sql_service = SQLService()
-
     mode = router_service.route(payload.question, payload.mode or settings.default_mode)
 
     if mode == "sql":
-        result = sql_service.ask(payload.question)
+        sql_service = runtime.get("sql_service")
+        if sql_service is None:
+            startup_error = runtime.get("startup_error")
+            detail = startup_error or "SQL service is not initialized."
+            raise HTTPException(status_code=503, detail=detail)
+
+        try:
+            result = await sql_service.ask(
+                question=payload.question,
+                top_k=payload.top_k or settings.sql_top_k,
+                max_new_tokens=payload.max_new_tokens or settings.max_new_tokens,
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"SQL generation failed: {exc}") from exc
     else:
         rag_service = runtime.get("rag_service")
         if rag_service is None:
@@ -93,16 +104,10 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
             full_text = ""
             async for chunk in stream:
                 full_text += chunk
-                yield (
-                    f"data: {json.dumps({'type': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
-                )
+                yield f"data: {json.dumps({'type': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
 
-            yield (
-                f"data: {json.dumps({'type': 'done', 'data': full_text}, ensure_ascii=False)}\n\n"
-            )
+            yield f"data: {json.dumps({'type': 'done', 'data': full_text}, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            yield (
-                f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
-            )
+            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
