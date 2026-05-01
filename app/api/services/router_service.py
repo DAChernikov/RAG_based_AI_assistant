@@ -12,16 +12,7 @@ class RouterService:
         "table ",
         "schema ",
         "aggregation",
-        "revenue",
-        "sales",
-        "orders",
-        "customers",
-        "refund",
-        "campaign",
-        "store type",
-        "product category",
-        "support tickets",
-        "purchase events",
+        "revenue by",
         "write sql",
     )
 

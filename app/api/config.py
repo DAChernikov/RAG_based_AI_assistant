@@ -27,9 +27,20 @@ class Settings(BaseSettings):
     doc_top_k: int = 5
     code_top_k: int = 3
     max_new_tokens: int = 320
+
     sql_top_k: int = 10
+    sql_schema_source: str = "database_schema"
     sql_dialect: str = "postgres"
     sql_max_repair_attempts: int = 1
+    sql_enable_explain_validation: bool = False
+    sql_explain_timeout_sec: float = 10.0
+
+    postgres_host: str | None = None
+    postgres_port: int = 5432
+    postgres_db: str | None = None
+    postgres_user: str | None = None
+    postgres_password: str | None = None
+    postgres_sslmode: str = "require"
 
     min_confident_code_score: float = 0.58
     min_confident_doc_score: float = 0.45

@@ -1,8 +1,16 @@
+import sys
 from pathlib import Path
 
 import joblib
 import numpy as np
+import sentence_transformers
 from sentence_transformers import SentenceTransformer
+
+# Compatibility for artifacts saved with newer sentence-transformers versions.
+try:
+    import sentence_transformers.base  # type: ignore  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover
+    sys.modules["sentence_transformers.base"] = sentence_transformers
 
 
 class RetrieverLoader:
@@ -52,25 +60,25 @@ class RetrieverLoader:
         scores = raw_scores.copy()
 
         preferred_sources = set(preferred_sources or [])
-        source_filter_set = set(source_filter or [])
         source_boosts = source_boosts or {}
+        source_filter_set = set(source_filter or [])
 
-        candidate_idx: list[int] = []
-        for idx, doc in enumerate(self.corpus):
-            source = doc.get("source", "unknown")
-            if source_filter_set and source not in source_filter_set:
-                continue
+        if preferred_sources or source_boosts:
+            for idx, doc in enumerate(self.corpus):
+                source = doc.get("source", "unknown")
+                if source in preferred_sources:
+                    scores[idx] += 0.08
+                scores[idx] += source_boosts.get(source, 0.0)
 
-            candidate_idx.append(idx)
-
-            if source in preferred_sources:
-                scores[idx] += 0.08
-            scores[idx] += source_boosts.get(source, 0.0)
-
-        if not candidate_idx:
-            return []
-
-        ranked_idx = sorted(candidate_idx, key=lambda idx: scores[idx], reverse=True)
+        if source_filter_set:
+            candidate_idx = [
+                idx
+                for idx, doc in enumerate(self.corpus)
+                if doc.get("source", "unknown") in source_filter_set
+            ]
+            ranked_idx = sorted(candidate_idx, key=lambda idx: scores[idx], reverse=True)
+        else:
+            ranked_idx = np.argsort(scores)[::-1]
 
         results: list[dict] = []
         seen: set[str] = set()
@@ -88,7 +96,6 @@ class RetrieverLoader:
                     "source": doc.get("source", "unknown"),
                     "title": doc.get("title"),
                     "text": doc.get("text"),
-                    "metadata": doc.get("metadata"),
                     "score": float(scores[idx]),
                     "raw_score": float(raw_scores[idx]),
                 }

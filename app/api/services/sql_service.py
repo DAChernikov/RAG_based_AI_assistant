@@ -1,207 +1,354 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from app.api.config import settings
 from app.api.services.rag_service import RAGService
 from app.api.services.sql_prompt_builder import SQLPromptBuilder
+
+try:
+    import psycopg
+except Exception:  # pragma: no cover - optional dependency/runtime env
+    psycopg = None
 
 
 @dataclass
 class SQLValidationResult:
     is_valid: bool
     errors: list[str]
+    warnings: list[str]
     sql: str | None
     used_tables: list[str]
+    allowed_tables: list[str]
+    explain_checked: bool = False
+    explain_error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "is_valid": self.is_valid,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "sql": self.sql,
+            "used_tables": self.used_tables,
+            "allowed_tables": self.allowed_tables,
+            "explain_checked": self.explain_checked,
+            "explain_error": self.explain_error,
+        }
 
 
 class SQLService:
-    DANGEROUS_SQL = re.compile(
-        r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|merge)\b",
-        re.IGNORECASE,
+    FORBIDDEN_KEYWORDS = (
+        "insert",
+        "update",
+        "delete",
+        "drop",
+        "alter",
+        "truncate",
+        "create",
+        "grant",
+        "revoke",
+        "merge",
+        "copy",
+        "call",
     )
-    TABLE_PATTERN = re.compile(r"\b(?:from|join)\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)", re.I)
 
-    def __init__(self, retriever=None, llm_service=None):
+    TABLE_PATTERN = re.compile(
+        r"\b(?:from|join)\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)",
+        flags=re.IGNORECASE,
+    )
+
+    CODE_FENCE_PATTERN = re.compile(r"```(?:sql)?\s*(.*?)```", flags=re.IGNORECASE | re.DOTALL)
+
+    def __init__(self, retriever, llm_service):
         self.retriever = retriever
         self.llm_service = llm_service
 
     @staticmethod
-    def _schema_doc_table_name(doc: dict) -> str | None:
-        metadata = doc.get("metadata") or {}
-        table = metadata.get("table")
-        schema = metadata.get("schema")
-        if schema and table:
-            return f"{schema}.{table}"
+    def _build_confidence(
+        retrieved: list[dict], top_k: int, validation: SQLValidationResult
+    ) -> dict:
+        base = RAGService._build_confidence(retrieved, top_k=top_k) or {}
+        base["validation"] = validation.to_dict()
+        base["sql_top_k"] = top_k
+        base["source_filter"] = [settings.sql_schema_source]
+        return base
 
-        title = doc.get("title") or ""
-        match = re.search(r"([a-zA-Z_][\w]*\.[a-zA-Z_][\w]*)", title)
-        if match:
-            return match.group(1)
+    @staticmethod
+    def _compact_retrieved(retrieved: list[dict]) -> list[dict]:
+        return [
+            {
+                "doc_id": r.get("doc_id", "unknown"),
+                "source": r.get("source", "unknown"),
+                "score": float(r.get("score", 0.0)),
+                "title": r.get("title"),
+            }
+            for r in retrieved
+        ]
 
-        doc_id = doc.get("doc_id") or ""
-        match = re.search(r"([a-zA-Z_][\w]*\.[a-zA-Z_][\w]*)", doc_id)
-        if match:
-            return match.group(1)
-
-        return None
+    @staticmethod
+    def _strip_trailing_semicolon(sql_text: str) -> str:
+        return sql_text.strip().rstrip(";").strip()
 
     @classmethod
-    def _extract_sql(cls, answer: str) -> str | None:
+    def extract_sql(cls, answer: str) -> str | None:
         if not answer:
             return None
 
-        text = answer.strip()
-        text = text.replace("```sql", "").replace("```", "")
+        fenced = cls.CODE_FENCE_PATTERN.findall(answer)
+        if fenced:
+            return cls._strip_trailing_semicolon(fenced[-1])
 
-        match = re.search(r"\bSQL\s*:\s*(.+)$", text, flags=re.I | re.S)
+        marker = re.search(r"\bSQL\s*:\s*", answer, flags=re.IGNORECASE)
+        if marker:
+            candidate = answer[marker.end() :].strip()
+            candidate = re.split(
+                r"\n\s*(?:EXPLANATION|VALIDATION|SOURCES)\s*:", candidate, flags=re.I
+            )[0]
+            return cls._strip_trailing_semicolon(candidate)
+
+        # Fallback: take text starting at SELECT/WITH.
+        match = re.search(r"\b(select|with)\b", answer, flags=re.IGNORECASE)
         if match:
-            sql = match.group(1).strip()
-        else:
-            select_match = re.search(r"\b(with|select)\b.+", text, flags=re.I | re.S)
-            if not select_match:
-                return None
-            sql = select_match.group(0).strip()
+            return cls._strip_trailing_semicolon(answer[match.start() :])
 
-        sql = sql.strip()
-        if not sql:
-            return None
+        return None
 
-        return sql
+    @staticmethod
+    def _normalize_table_name(name: str) -> str:
+        return name.strip().strip('"').lower()
 
     @classmethod
-    def _used_tables(cls, sql: str) -> list[str]:
+    def extract_used_tables(cls, sql_text: str | None) -> list[str]:
+        if not sql_text:
+            return []
+
         tables: list[str] = []
-        for match in cls.TABLE_PATTERN.finditer(sql or ""):
-            table = match.group(1).strip().lower()
-            tables.append(table)
-        return sorted(set(tables))
+        for match in cls.TABLE_PATTERN.finditer(sql_text):
+            table = cls._normalize_table_name(match.group(1))
+            if table not in tables:
+                tables.append(table)
+        return tables
 
-    def _validate_sql(self, answer: str, retrieved: list[dict]) -> SQLValidationResult:
-        sql = self._extract_sql(answer)
+    @staticmethod
+    def _allowed_tables_from_docs(schema_docs: list[dict]) -> list[str]:
+        allowed: list[str] = []
+
+        for doc in schema_docs:
+            title = (doc.get("title") or "").strip()
+            metadata = doc.get("metadata") or {}
+            schema = metadata.get("schema")
+            table = metadata.get("table")
+
+            candidates = []
+            if title:
+                candidates.append(title)
+            if schema and table:
+                candidates.append(f"{schema}.{table}")
+                candidates.append(str(table))
+
+            for candidate in candidates:
+                normalized = candidate.strip().strip('"').lower()
+                if normalized and normalized not in allowed:
+                    allowed.append(normalized)
+
+        return allowed
+
+    @staticmethod
+    def _has_forbidden_keyword(sql_text: str) -> str | None:
+        lowered = re.sub(r"\s+", " ", sql_text.lower())
+        for keyword in SQLService.FORBIDDEN_KEYWORDS:
+            if re.search(rf"\b{re.escape(keyword)}\b", lowered):
+                return keyword
+        return None
+
+    async def _postgres_explain(self, sql_text: str) -> tuple[bool, str | None]:
+        if not settings.sql_enable_explain_validation:
+            return False, None
+
+        if psycopg is None:
+            return False, "psycopg is not installed; EXPLAIN validation skipped."
+
+        if not all(
+            [
+                settings.postgres_host,
+                settings.postgres_db,
+                settings.postgres_user,
+                settings.postgres_password,
+            ]
+        ):
+            return False, "Postgres connection settings are incomplete; EXPLAIN validation skipped."
+
+        try:
+            conn_kwargs = {
+                "host": settings.postgres_host,
+                "port": settings.postgres_port,
+                "dbname": settings.postgres_db,
+                "user": settings.postgres_user,
+                "password": settings.postgres_password,
+                "sslmode": settings.postgres_sslmode,
+                "connect_timeout": int(settings.sql_explain_timeout_sec),
+            }
+            with psycopg.connect(**conn_kwargs) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"EXPLAIN {sql_text}")
+                    cur.fetchall()
+            return True, None
+        except Exception as exc:  # pragma: no cover - depends on external DB
+            return True, str(exc)
+
+    async def validate_sql(self, answer: str, schema_docs: list[dict]) -> SQLValidationResult:
         errors: list[str] = []
+        warnings: list[str] = []
 
-        if not sql:
-            return SQLValidationResult(
-                is_valid=False,
-                errors=["No SQL query was found in the answer."],
-                sql=None,
-                used_tables=[],
-            )
+        sql_text = self.extract_sql(answer)
+        allowed_tables = self._allowed_tables_from_docs(schema_docs)
+        used_tables = self.extract_used_tables(sql_text)
 
-        if self.DANGEROUS_SQL.search(sql):
-            errors.append("Only read-only SELECT/WITH queries are allowed.")
+        if not sql_text:
+            errors.append("No SQL query was found in the LLM answer.")
+            return SQLValidationResult(False, errors, warnings, None, [], allowed_tables)
 
-        if not re.match(r"^\s*(select|with)\b", sql, flags=re.I):
+        first_token = sql_text.lstrip().split(maxsplit=1)[0].lower() if sql_text.strip() else ""
+        if first_token not in {"select", "with"}:
             errors.append("SQL must start with SELECT or WITH.")
 
-        used_tables = self._used_tables(sql)
-        allowed_full_tables = {
-            table.lower()
-            for table in (self._schema_doc_table_name(doc) for doc in retrieved)
-            if table
-        }
-        allowed_short_tables = {table.split(".")[-1] for table in allowed_full_tables}
+        forbidden = self._has_forbidden_keyword(sql_text)
+        if forbidden:
+            errors.append(f"Forbidden SQL keyword used: {forbidden.upper()}.")
 
-        for table in used_tables:
-            short_table = table.split(".")[-1]
-            if table not in allowed_full_tables and short_table not in allowed_short_tables:
-                errors.append(f"Table '{table}' is not present in retrieved schema context.")
+        if not used_tables:
+            warnings.append("No FROM/JOIN table reference was detected.")
+
+        allowed_unqualified = {table.split(".")[-1] for table in allowed_tables}
+        allowed_all = set(allowed_tables) | allowed_unqualified
+
+        unknown_tables = [table for table in used_tables if table not in allowed_all]
+        if unknown_tables:
+            errors.append(
+                "SQL references tables that are not present in retrieved schema context: "
+                + ", ".join(unknown_tables)
+            )
+
+        explain_checked = False
+        explain_error = None
+        if not errors and settings.sql_enable_explain_validation:
+            explain_checked, explain_error = await self._postgres_explain(sql_text)
+            if explain_error and "skipped" not in explain_error.lower():
+                errors.append(f"Postgres EXPLAIN failed: {explain_error}")
 
         return SQLValidationResult(
             is_valid=not errors,
             errors=errors,
-            sql=sql,
+            warnings=warnings,
+            sql=sql_text,
             used_tables=used_tables,
+            allowed_tables=allowed_tables,
+            explain_checked=explain_checked,
+            explain_error=explain_error,
         )
 
-    def _fallback_answer(self, question: str, retrieved: list[dict]) -> str:
-        schema_titles = ", ".join(
-            doc.get("title") or doc.get("doc_id", "unknown") for doc in retrieved[:5]
+    async def _generate_once(
+        self, question: str, schema_docs: list[dict], max_new_tokens: int
+    ) -> str:
+        prompt = SQLPromptBuilder.build_generate_prompt(
+            question=question,
+            schema_docs=schema_docs,
+            dialect=settings.sql_dialect,
+            max_context_chars=settings.llm_max_context_chars,
         )
-        return (
-            "EXPLANATION:\n"
-            "The SQL generator could not call the LLM, but relevant schema context was found.\n"
-            "SQL:\n"
-            f"-- Question: {question}\n"
-            f"-- Relevant schema objects: {schema_titles}\n"
-            "-- Configure LLM_API_KEY to generate a PostgreSQL query."
+        return await self.llm_service.generate(prompt=prompt, max_new_tokens=max_new_tokens)
+
+    async def _repair_once(
+        self,
+        *,
+        question: str,
+        schema_docs: list[dict],
+        previous_answer: str,
+        validation_errors: list[str],
+        max_new_tokens: int,
+    ) -> str:
+        prompt = SQLPromptBuilder.build_repair_prompt(
+            question=question,
+            schema_docs=schema_docs,
+            previous_answer=previous_answer,
+            validation_errors=validation_errors,
+            dialect=settings.sql_dialect,
+            max_context_chars=settings.llm_max_context_chars,
         )
+        return await self.llm_service.generate(prompt=prompt, max_new_tokens=max_new_tokens)
 
     async def ask(
         self,
+        *,
         question: str,
         top_k: int | None = None,
         max_new_tokens: int | None = None,
     ) -> dict:
-        if self.retriever is None:
-            return {
-                "answer": "SQL service is not initialized: retriever is missing.",
-                "mode": "sql",
-                "confidence": None,
-                "retrieved": [],
-            }
-
         effective_top_k = top_k or settings.sql_top_k
+        effective_max_tokens = max_new_tokens or settings.max_new_tokens
+
         retrieved = self.retriever.search(
             question,
             top_k=effective_top_k,
-            source_filter=["database_schema"],
+            source_filter=[settings.sql_schema_source],
         )
-        confidence = RAGService._build_confidence(retrieved, top_k=len(retrieved))
 
         if not retrieved:
+            validation = SQLValidationResult(
+                is_valid=False,
+                errors=["No database schema documents were retrieved."],
+                warnings=[],
+                sql=None,
+                used_tables=[],
+                allowed_tables=[],
+            )
             return {
-                "answer": "No database schema context was found for this SQL question.",
+                "question": question,
+                "answer": "No database schema documents were found for SQL generation.",
                 "mode": "sql",
-                "confidence": confidence,
+                "confidence": self._build_confidence([], effective_top_k, validation),
                 "retrieved": [],
             }
 
-        if not self.llm_service or not self.llm_service.is_configured():
-            answer = self._fallback_answer(question, retrieved)
-            validation = self._validate_sql(answer, retrieved)
-        else:
-            prompt = SQLPromptBuilder.build(question=question, retrieved=retrieved)
-            answer = await self.llm_service.generate(
-                prompt=prompt,
-                max_new_tokens=max_new_tokens or settings.max_new_tokens,
+        if not self.llm_service.is_configured():
+            answer = "LLM is not configured. SQL generation is unavailable."
+            validation = SQLValidationResult(
+                is_valid=False,
+                errors=["LLM is not configured."],
+                warnings=[],
+                sql=None,
+                used_tables=[],
+                allowed_tables=self._allowed_tables_from_docs(retrieved),
             )
-            validation = self._validate_sql(answer, retrieved)
+        else:
+            answer = await self._generate_once(question, retrieved, effective_max_tokens)
+            validation = await self.validate_sql(answer, retrieved)
 
-            repair_attempts = 0
-            while not validation.is_valid and repair_attempts < settings.sql_max_repair_attempts:
-                repair_attempts += 1
-                repair_prompt = SQLPromptBuilder.build(
+            attempts = 0
+            while (
+                not validation.is_valid
+                and attempts < settings.sql_max_repair_attempts
+                and self.llm_service.is_configured()
+            ):
+                attempts += 1
+                answer = await self._repair_once(
                     question=question,
-                    retrieved=retrieved,
-                    validation_errors=validation.errors,
+                    schema_docs=retrieved,
                     previous_answer=answer,
+                    validation_errors=validation.errors,
+                    max_new_tokens=effective_max_tokens,
                 )
-                answer = await self.llm_service.generate(
-                    prompt=repair_prompt,
-                    max_new_tokens=max_new_tokens or settings.max_new_tokens,
-                )
-                validation = self._validate_sql(answer, retrieved)
+                validation = await self.validate_sql(answer, retrieved)
+                validation.warnings.append(f"Repair attempts used: {attempts}")
 
-        confidence = confidence or {}
-        confidence["validation"] = {
-            "is_valid": validation.is_valid,
-            "errors": validation.errors,
-            "used_tables": validation.used_tables,
-        }
+        confidence = self._build_confidence(retrieved, effective_top_k, validation)
 
         return {
             "question": question,
             "answer": answer,
             "mode": "sql",
             "confidence": confidence,
-            "retrieved": [
-                {
-                    "doc_id": r["doc_id"],
-                    "source": r["source"],
-                    "score": r["score"],
-                    "title": r.get("title"),
-                }
-                for r in retrieved
-            ],
+            "retrieved": self._compact_retrieved(retrieved),
         }

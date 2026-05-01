@@ -26,12 +26,6 @@ services:
         value: "5"
       - key: MAX_NEW_TOKENS
         value: "220"
-      - key: SQL_TOP_K
-        value: "10"
-      - key: SQL_DIALECT
-        value: postgres
-      - key: SQL_MAX_REPAIR_ATTEMPTS
-        value: "1"
       - key: LLM_PROVIDER
         value: gemini
       - key: LLM_MODEL
@@ -42,6 +36,30 @@ services:
         value: "12000"
       - key: REQUEST_TIMEOUT
         value: "60"
+      - key: SQL_TOP_K
+        value: "10"
+      - key: SQL_SCHEMA_SOURCE
+        value: database_schema
+      - key: SQL_DIALECT
+        value: postgres
+      - key: SQL_MAX_REPAIR_ATTEMPTS
+        value: "1"
+      - key: SQL_ENABLE_EXPLAIN_VALIDATION
+        value: "false"
+      - key: SQL_EXPLAIN_TIMEOUT_SEC
+        value: "10"
+      - key: POSTGRES_HOST
+        sync: false
+      - key: POSTGRES_PORT
+        value: "5432"
+      - key: POSTGRES_DB
+        sync: false
+      - key: POSTGRES_USER
+        sync: false
+      - key: POSTGRES_PASSWORD
+        sync: false
+      - key: POSTGRES_SSLMODE
+        value: require
       - key: STREAM_EDIT_INTERVAL_SEC
         value: "1.0"
       - key: STREAM_MIN_CHARS_DELTA

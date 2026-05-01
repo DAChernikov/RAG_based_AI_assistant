@@ -17,6 +17,14 @@ RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
     torch==2.9.0
 
+# Align runtime libraries with the retriever artifact saved in Colab.
+RUN pip install --no-cache-dir \
+    sentence-transformers==5.4.1 \
+    transformers==5.0.0 \
+    tokenizers==0.22.1 \
+    accelerate==1.11.0 \
+    psycopg[binary]==3.2.4
+
 COPY app /app/app
 COPY .env.example /app/.env.example
 
