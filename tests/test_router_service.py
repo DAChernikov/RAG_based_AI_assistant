@@ -27,3 +27,15 @@ def test_route_auto_rag_docs():
     service = RouterService()
     result = service.route("What is Apache Spark?")
     assert result == "rag_docs"
+
+
+def test_route_sales_by_product_category_as_sql():
+    service = RouterService()
+    result = service.route("Show sales by product category")
+    assert result == "sql"
+
+
+def test_route_currency_conversion_as_sql():
+    service = RouterService()
+    result = service.route("Convert daily order revenue from EUR to USD")
+    assert result == "sql"

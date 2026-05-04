@@ -25,7 +25,11 @@ services:
       - key: TOP_K
         value: "5"
       - key: MAX_NEW_TOKENS
-        value: "220"
+        value: "1000"
+      - key: DOC_MAX_NEW_TOKENS
+        value: "1500"
+      - key: CODE_MAX_NEW_TOKENS
+        value: "2000"
       - key: LLM_PROVIDER
         value: gemini
       - key: LLM_MODEL
@@ -45,11 +49,11 @@ services:
       - key: SQL_MAX_REPAIR_ATTEMPTS
         value: "1"
       - key: SQL_MAX_NEW_TOKENS
-        value: "700"
+        value: "2000"
       - key: SQL_TEMPERATURE
         value: "0.0"
       - key: SQL_ENABLE_EXPLAIN_VALIDATION
-        value: "false"
+        value: "true"
       - key: SQL_EXPLAIN_TIMEOUT_SEC
         value: "10"
       - key: POSTGRES_HOST
@@ -102,6 +106,8 @@ services:
         value: "1.0"
       - key: STREAM_MIN_CHARS_DELTA
         value: "40"
+      - key: USE_MESSAGE_DRAFTS
+        value: "false"
       - key: API_BASE_URL
         value: https://rag-ai-assistant-api.onrender.com
       - key: TELEGRAM_BOT_TOKEN

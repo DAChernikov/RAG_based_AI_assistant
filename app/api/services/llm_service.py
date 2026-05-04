@@ -7,6 +7,19 @@ import httpx
 from app.api.config import settings
 
 
+class LLMRateLimitError(RuntimeError):
+    """Raised when external LLM provider returns rate limit error."""
+
+    def __init__(
+        self,
+        message: str = (
+            "Сервис временно упёрся в лимит LLM API. "
+            "Попробуйте повторить запрос через некоторое время."
+        ),
+    ):
+        super().__init__(message)
+
+
 class LLMService:
     RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
@@ -70,6 +83,13 @@ class LLMService:
             },
         }
 
+    @staticmethod
+    def _raise_for_llm_status(response: httpx.Response) -> None:
+        if response.status_code == 429:
+            raise LLMRateLimitError()
+
+        response.raise_for_status()
+
     async def generate(
         self,
         *,
@@ -88,11 +108,14 @@ class LLMService:
         body = self._build_body(prompt, max_new_tokens, temperature)
 
         last_error: Exception | None = None
+        last_status_code: int | None = None
 
         for attempt in range(settings.llm_retries + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.post(url, json=body)
+
+                last_status_code = response.status_code
 
                 if (
                     response.status_code in self.RETRYABLE_STATUSES
@@ -101,15 +124,21 @@ class LLMService:
                     await asyncio.sleep(settings.llm_retry_backoff_sec * (attempt + 1))
                     continue
 
-                response.raise_for_status()
+                self._raise_for_llm_status(response)
                 payload = response.json()
                 return self._extract_text_from_gemini_payload(payload)
+
+            except LLMRateLimitError:
+                raise
 
             except (httpx.HTTPError, httpx.TimeoutException) as exc:
                 last_error = exc
                 if attempt >= settings.llm_retries:
                     break
                 await asyncio.sleep(settings.llm_retry_backoff_sec * (attempt + 1))
+
+        if last_status_code == 429:
+            raise LLMRateLimitError()
 
         if last_error:
             raise RuntimeError(f"LLM request failed: {last_error}") from last_error
@@ -135,7 +164,7 @@ class LLMService:
 
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=body) as response:
-                response.raise_for_status()
+                self._raise_for_llm_status(response)
 
                 emitted_text = ""
 

@@ -47,7 +47,6 @@ Critical rules:
 - Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE or COPY.
 - Always include a SQL query when the schema context contains the needed tables.
 - Do not answer with phrases like "the previous query".
-- Do not use markdown code fences.
 - Keep the answer concise.
 
 Return exactly this structure and nothing else:
@@ -55,7 +54,9 @@ EXPLANATION:
 <one short sentence explaining the query logic>
 
 SQL:
-<single PostgreSQL SELECT query without markdown fences>
+```sql
+<single PostgreSQL SELECT query>
+```
 
 DATABASE SCHEMA CONTEXT:
 {schema_context}
@@ -88,7 +89,6 @@ Critical rules:
 - Do not invent missing tables or columns.
 - Always include a corrected SQL query when the schema context contains the needed tables.
 - Do not answer with phrases like "the previous query".
-- Do not use markdown code fences.
 
 Validation errors:
 {errors}
@@ -98,7 +98,9 @@ EXPLANATION:
 <one short sentence explaining the corrected query logic>
 
 SQL:
-<single corrected PostgreSQL SELECT query without markdown fences>
+```sql
+<single corrected PostgreSQL SELECT query>
+```
 
 DATABASE SCHEMA CONTEXT:
 {schema_context}
@@ -128,10 +130,7 @@ Rules:
 - SQL dialect: {dialect}.
 - Use only tables and columns from the database schema context.
 - Prefer schema-qualified table names, for example rag_kg.orders.
-- Return only the SQL query text.
-- Do not use markdown code fences.
-- Do not add explanations.
-- Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE or COPY.
+- Return only the SQL query, with no prose and no markdown.
 
 DATABASE SCHEMA CONTEXT:
 {schema_context}

@@ -301,8 +301,10 @@ class SQLService:
                 "sslmode": settings.postgres_sslmode,
                 "connect_timeout": int(settings.sql_explain_timeout_sec),
             }
-            with psycopg.connect(**conn_kwargs) as conn:
+            with psycopg.connect(**conn_kwargs, autocommit=True, prepare_threshold=None) as conn:
                 with conn.cursor() as cur:
+                    timeout_ms = int(settings.sql_explain_timeout_sec * 1000)
+                    cur.execute("SET statement_timeout = %s", (timeout_ms,))
                     cur.execute(f"EXPLAIN {sql_text}")
                     cur.fetchall()
             return True, None
@@ -417,7 +419,11 @@ class SQLService:
             temperature=settings.sql_temperature,
         )
         sql_text = self._strip_trailing_semicolon(sql_text)
-        return f"EXPLANATION:\nGenerated SQL query for the requested analytical task.\n\nSQL:\n{sql_text}"
+        return (
+            "EXPLANATION:\n"
+            "Generated SQL query for the requested analytical task.\n\n"
+            f"SQL:\n{sql_text}"
+        )
 
     async def _repair_once(
         self,

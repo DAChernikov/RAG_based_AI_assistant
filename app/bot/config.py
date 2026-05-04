@@ -11,7 +11,7 @@ class BotSettings(BaseSettings):
 
     draft_push_interval_sec: float = 0.7
     typing_refresh_sec: float = 4.0
-    use_message_drafts: bool = True
+    use_message_drafts: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
