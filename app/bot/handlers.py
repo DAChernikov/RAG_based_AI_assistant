@@ -21,6 +21,9 @@ CODE_FENCE_RE = re.compile(r"```(\w+)?\s*\n?(.*?)```", flags=re.DOTALL)
 RATE_LIMIT_MESSAGE = (
     "Сервис временно упёрся в лимит LLM API. " "Попробуйте повторить запрос через некоторое время."
 )
+TEMPORARY_LLM_MESSAGE = (
+    "Сервис LLM временно недоступен. " "Попробуйте повторить запрос через некоторое время."
+)
 
 
 def _truncate(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> str:
@@ -37,7 +40,7 @@ def _format_score(value: Any) -> str:
 
 
 def _html_with_code_blocks(text: str) -> str:
-    """Escape normal text and render fenced code blocks as Telegram HTML code blocks."""
+    """Обертка для блока с кодом при формировании ответа для Telegram"""
     if not text:
         return ""
 
@@ -61,6 +64,7 @@ def _html_with_code_blocks(text: str) -> str:
 
 
 def _ensure_sql_answer_has_code_fence(answer: str) -> str:
+    """Обертка для блока с SQL-кодом при формировании ответа для Telegram"""
     if "```" in answer or not re.search(r"\bSQL\s*:", answer, flags=re.I):
         return answer
 
@@ -161,6 +165,9 @@ def _extract_api_error_message(exc: httpx.HTTPStatusError) -> str:
 
     if exc.response.status_code == 429:
         return RATE_LIMIT_MESSAGE
+
+    if exc.response.status_code in {500, 502, 503, 504}:
+        return TEMPORARY_LLM_MESSAGE
 
     return str(exc)
 

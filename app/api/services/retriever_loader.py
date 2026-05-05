@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -6,14 +8,15 @@ import numpy as np
 import sentence_transformers
 from sentence_transformers import SentenceTransformer
 
-# Compatibility for artifacts saved with newer sentence-transformers versions.
 try:
-    import sentence_transformers.base  # type: ignore  # noqa: F401
-except ModuleNotFoundError:  # pragma: no cover
+    import sentence_transformers.base
+except ModuleNotFoundError:
     sys.modules["sentence_transformers.base"] = sentence_transformers
 
 
 class RetrieverLoader:
+    """Загрузчик retriever модели и ее использование в поиске релевантных документов корпуса"""
+
     def __init__(self, artifacts_dir: str = "artifacts"):
         self.artifacts_dir = Path(artifacts_dir)
         self.model = None
@@ -55,6 +58,8 @@ class RetrieverLoader:
         source_boosts: dict[str, float] | None = None,
         source_filter: list[str] | None = None,
     ) -> list[dict]:
+        """Поиск top-k документов по пользовательскому запросу"""
+
         query_emb = self.encode(query)
         raw_scores = self.corpus_emb @ query_emb
         scores = raw_scores.copy()
@@ -96,6 +101,7 @@ class RetrieverLoader:
                     "source": doc.get("source", "unknown"),
                     "title": doc.get("title"),
                     "text": doc.get("text"),
+                    "metadata": doc.get("metadata") or {},
                     "score": float(scores[idx]),
                     "raw_score": float(raw_scores[idx]),
                 }

@@ -5,21 +5,25 @@ class SQLPromptBuilder:
     @staticmethod
     def _format_schema_context(schema_docs: list[dict], max_chars: int) -> str:
         parts: list[str] = []
-        used = 0
+        used_chars = 0
 
         for idx, doc in enumerate(schema_docs, start=1):
             title = doc.get("title") or doc.get("doc_id") or f"schema_doc_{idx}"
             text = (doc.get("text") or "").strip()
-            block = f"[Schema source {idx}: {title}]\n{text}\n"
 
-            if used + len(block) > max_chars:
-                remaining = max_chars - used
+            if not text:
+                continue
+
+            block = f"[Schema {idx}: {title}]\n{text}\n"
+
+            if used_chars + len(block) > max_chars:
+                remaining = max_chars - used_chars
                 if remaining > 500:
                     parts.append(block[:remaining])
                 break
 
             parts.append(block)
-            used += len(block)
+            used_chars += len(block)
 
         return "\n".join(parts).strip()
 
@@ -32,38 +36,29 @@ class SQLPromptBuilder:
         dialect: str = "postgres",
         max_context_chars: int = 12000,
     ) -> str:
-        schema_context = cls._format_schema_context(schema_docs, max_chars=max_context_chars)
+        schema_context = cls._format_schema_context(
+            schema_docs,
+            max_chars=max_context_chars,
+        )
 
-        return f"""
-You are a senior data analyst and PostgreSQL generation assistant.
-Generate a valid SQL query for the user's analytical question.
-
-Critical rules:
-- SQL dialect: {dialect}.
-- Use only tables and columns from the provided database schema context.
-- Do not invent table names or column names.
-- Prefer schema-qualified table names, for example rag_kg.orders.
-- Generate only read-only SQL: SELECT or WITH ... SELECT.
-- Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE or COPY.
-- Always include a SQL query when the schema context contains the needed tables.
-- Do not answer with phrases like "the previous query".
-- Keep the answer concise.
-
-Return exactly this structure and nothing else:
-EXPLANATION:
-<one short sentence explaining the query logic>
-
-SQL:
-```sql
-<single PostgreSQL SELECT query>
-```
-
-DATABASE SCHEMA CONTEXT:
-{schema_context}
-
-USER QUESTION:
-{question}
-""".strip()
+        return f"""You are helping an analyst write a {dialect} query.
+            Use only the schema shown below. Table and column names must come from this schema.
+            Prefer schema-qualified table names such as rag_kg.orders.
+            Generate a read-only query only: SELECT or WITH ... SELECT.
+            Always include the SQL query. Do not answer by referring to a previous query.
+            Keep the explanation to one short sentence.
+            Return the answer in this format:
+            EXPLANATION:
+            <short explanation>
+            SQL:
+            ```sql
+            <query>
+            ```
+            Schema:
+            {schema_context}
+            Question:
+            {question}
+            """.strip()
 
     @classmethod
     def build_repair_prompt(
@@ -76,41 +71,33 @@ USER QUESTION:
         dialect: str = "postgres",
         max_context_chars: int = 12000,
     ) -> str:
-        schema_context = cls._format_schema_context(schema_docs, max_chars=max_context_chars)
-        errors = "\n".join(f"- {err}" for err in validation_errors)
+        schema_context = cls._format_schema_context(
+            schema_docs,
+            max_chars=max_context_chars,
+        )
+        errors = "\n".join(f"- {error}" for error in validation_errors)
 
-        return f"""
-The previous SQL answer failed validation. Repair it.
-
-Critical rules:
-- SQL dialect: {dialect}.
-- Use only tables and columns from the database schema context.
-- Return only read-only SQL: SELECT or WITH ... SELECT.
-- Do not invent missing tables or columns.
-- Always include a corrected SQL query when the schema context contains the needed tables.
-- Do not answer with phrases like "the previous query".
-
-Validation errors:
-{errors}
-
-Return exactly this structure and nothing else:
-EXPLANATION:
-<one short sentence explaining the corrected query logic>
-
-SQL:
-```sql
-<single corrected PostgreSQL SELECT query>
-```
-
-DATABASE SCHEMA CONTEXT:
-{schema_context}
-
-USER QUESTION:
-{question}
-
-FAILED PREVIOUS ANSWER:
-{previous_answer}
-""".strip()
+        return f"""The previous answer did not pass SQL validation. 
+            Rewrite it as a valid {dialect} query.
+            Use only the provided schema and keep the query read-only.
+            Do not add tables or columns that are not present in the schema.
+            Always include the corrected SQL query.
+            Validation errors:
+            {errors}
+            Return the answer in this format:
+            EXPLANATION:
+            <short explanation>
+            SQL:
+            ```sql
+            <query>
+            ```
+            Schema:
+            {schema_context}
+            Question:
+            {question}
+            Previous answer:
+            {previous_answer}
+            """.strip()
 
     @classmethod
     def build_sql_only_prompt(
@@ -121,20 +108,17 @@ FAILED PREVIOUS ANSWER:
         dialect: str = "postgres",
         max_context_chars: int = 12000,
     ) -> str:
-        schema_context = cls._format_schema_context(schema_docs, max_chars=max_context_chars)
+        schema_context = cls._format_schema_context(
+            schema_docs,
+            max_chars=max_context_chars,
+        )
 
-        return f"""
-Generate one valid read-only SQL query for the user's analytical question.
-
-Rules:
-- SQL dialect: {dialect}.
-- Use only tables and columns from the database schema context.
-- Prefer schema-qualified table names, for example rag_kg.orders.
-- Return only the SQL query, with no prose and no markdown.
-
-DATABASE SCHEMA CONTEXT:
-{schema_context}
-
-USER QUESTION:
-{question}
-""".strip()
+        return f"""Write one read-only {dialect} query for the question.
+            Use only the tables and columns from the schema below.
+            Prefer schema-qualified table names.
+            Return only the SQL query, without markdown or explanation.
+            Schema:
+            {schema_context}
+            Question:
+            {question}
+            """.strip()

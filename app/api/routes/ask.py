@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from app.api.config import settings
 from app.api.dependencies import AppStateError, get_runtime_state
 from app.api.schemas import AskRequest, AskResponse, RetrievedDocument
-from app.api.services.llm_service import LLMRateLimitError
+from app.api.services.llm_service import LLMRateLimitError, LLMTemporaryUnavailableError
 from app.api.services.router_service import RouterService
 from app.api.services.sql_service import SQLService
 
@@ -36,6 +36,8 @@ async def ask(payload: AskRequest, runtime: dict = Depends(get_runtime_state)) -
             )
         except LLMRateLimitError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMTemporaryUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"SQL generation failed: {exc}") from exc
@@ -64,6 +66,8 @@ async def ask(payload: AskRequest, runtime: dict = Depends(get_runtime_state)) -
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except LLMRateLimitError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMTemporaryUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
@@ -109,6 +113,8 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
             )
         except LLMRateLimitError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMTemporaryUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"SQL generation failed: {exc}") from exc
@@ -147,6 +153,8 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
         )
     except LLMRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except LLMTemporaryUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Streaming inference failed: {exc}") from exc
@@ -166,6 +174,10 @@ async def ask_stream(payload: AskRequest, runtime: dict = Depends(get_runtime_st
                 f"data: {json.dumps({'type': 'done', 'data': full_text}, ensure_ascii=False)}\n\n"
             )
         except LLMRateLimitError as exc:
+            yield (
+                f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
+            )
+        except LLMTemporaryUnavailableError as exc:
             yield (
                 f"data: {json.dumps({'type': 'error', 'data': str(exc)}, ensure_ascii=False)}\n\n"
             )

@@ -1,94 +1,151 @@
 # RAG Based AI Assistant
 
-Production-like локальный MVP AI-assistant на базе:
-- FastAPI API
-- retrieval pipeline
-- внешней LLM для генерации ответа
-- Telegram bot
-- S3-compatible storage для артефактов retriever
+Прототип корпоративного AI-ассистента на основе RAG-системы для дипломной работы магистерской программы "Искусственный интеллект" НИУ ВШЭ "Разработка ассистента на основе RAG-системы".
 
-## Возможности
+Сервис отвечает на вопросы по изолированной технической документации, шаблонам кода и структуре реляционной базы данных. 
+Основной пользовательский интерфейс — Telegram-бот, backend реализован на FastAPI.
 
-- `/health` и `/ready` для диагностики API
-- `/ask` для обычного ответа
-- `/ask/stream` для потоковой генерации
-- Telegram bot с потоковым обновлением ответа
-- автоматическая загрузка артефактов из S3 при старте сервиса
-- запуск как локально, так и через Docker Compose
+## Основные сценарии прототипа
 
-## Установка
-```bash
-poetry install --with bot,dev
+- поиск ответов по официальной документации Spark, Trino и Hive;
+- ответы на вопросы по Python/code corpus шаблонам;
+- генерация PostgreSQL-запросов по естественно-языковому описанию аналитической задачи;
+- проверка релевантности SQL-ответа через статическую валидацию таблиц/колонок и PostgreSQL команды `EXPLAIN`;
+- загрузка артефактов retriever из S3-хранилища.
+
+## Архитектура
+
+```text
+Telegram Bot / HTTP client
+        |
+        v
+FastAPI API
+        |
+        +-- RouterService
+        |      +-- rag_docs
+        |      +-- rag_code
+        |      +-- sql
+        |
+        +-- RetrieverLoader
+        |      +-- corpus.joblib
+        |      +-- corpus_emb.npy
+        |      +-- retriever_model/
+        |
+        +-- RAGService
+        |      +-- context retrieval
+        |      +-- LLM answer generation
+        |
+        +-- SQLService
+               +-- schema-only retrieval
+               +-- SQL generation
+               +-- static validation
+               +-- PostgreSQL EXPLAIN validation
 ```
 
-## Настройка окружения
+## Структура проекта
 
-1. Создайте .env на основе .env.example.
-
-2. Настройка параметров запуска:
-
-- Для локального запуска бота параметры следующие:
-
-```bash
-API_BASE_URL=http://127.0.0.1:8000
-ARTIFACTS_DIR=artifacts/artifacts_rag_baseline_latest
+```text
+app/api/              FastAPI backend
+app/api/routes/       HTTP endpoints
+app/api/services/     RAG, SQL, LLM and artifact services
+app/bot/              Telegram bot
+tests/                Unit tests
+infra/                Dockerfiles for API and bot
+notebooks/            Retriever training/tuning and upload to S3
+render.yaml           Render deployment config
 ```
-- Для Docker Compose запуска:
-```bash
-API_BASE_URL=http://api:8000
-ARTIFACTS_DIR=/app/artifacts/artifacts_rag_baseline_latest
-```
-
-Также должны быть заданы:
-- `TELEGRAM_BOT_TOKEN`
-- `LLM_API_KEY`
-- `S3_BUCKET`
-- `S3_ARTIFACT_KEY`
-- `S3 credentials`
 
 ## Локальный запуск
 
-- API
 ```bash
-make run-api
+poetry install --with bot,dev
+cp .env.example .env
 ```
 
-- Bot
+Необходимо заполнить `.env` необходимыми ключами для GeminiAI, S3, Telegram и Postgres.
+
+## Запуск API
+
 ```bash
-make run-bot
+make run-api-reload
 ```
 
-## Docker Compose запуск
-```bash
-make up
-```
-
-## Остановка сервиса:
-```bash
-make down
-```
-
-### Тесты
-```
-make test
-```
-
-### Форматирование и линтинг
-```bash
-make fmt
-make lint
-```
-
-## Проверка API
+Проверка состояния:
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
 ```
 
-### Пример вопроса:
+## Проверка запросов к API
+
+Вопрос по текстовой документации:
+
 ```bash
 curl -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"question":"What is Apache Spark?"}'
+```
+
+Вопрос по шаблону кода:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How to sort list in Python?"}'
+```
+
+Вопрос по актуальному SQL-коду:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Convert daily order revenue from EUR to USD","mode":"sql","top_k":10}'
+```
+
+## Запуск Telegram-бота
+
+```bash
+make run-bot
+```
+
+Для локального запуска в `.env` используйте:
+
+```env
+API_BASE_URL=http://127.0.0.1:8000   # вместо 127.0.0.1 можно также localhost
+```
+
+Для Docker Compose внутри контейнерной сети:
+
+```env
+API_BASE_URL=http://api:8000
+```
+
+В `render.com` используется сгенерированный при деплое адрес API-сервиса.
+На текущий момент `API_BASE_URL` от `render`: https://rag-ai-assistant-api.onrender.com, 
+соответственно использовать сервис можно также по этой ссылке.
+
+## Docker Compose вариант запуска
+
+```bash
+make up     # Поднять композицию Docker-контейнеров
+make down   # Отключить композицию Docker-контейнеров
+```
+
+## Примечания
+
+Проект адаптирован для деплоя на сайте Render.com.
+Для этого в `render.yaml` описаны два сервиса:
+
+- `rag-ai-assistant-api` — FastAPI backend;
+- `rag-ai-assistant-bot` — Telegram worker.
+
+А все секреты задаются через Environment Variables.
+
+**В проекте также встроены проверки кода**
+
+```bash
+make fmt
+make lint
+make test
 ```

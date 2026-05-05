@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import re
 
 
 class RouterService:
+    """Небольшой маршрутизатор пользовательских запросов в RAG-системе по ключевым словам"""
+
     SQL_HINTS = (
         "sql",
         "query",

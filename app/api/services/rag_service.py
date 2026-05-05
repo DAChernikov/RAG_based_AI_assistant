@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import AsyncIterator
 
 from app.api.config import settings
@@ -5,6 +7,10 @@ from app.api.services.prompt_builder import PromptBuilder
 
 
 class RAGService:
+    """RAG-сервис для поиска ответов по документации/шаблонам кода в корпусе retriever.
+    Рассматривается только docs и code часть, SQL вынесен в отдельный сервис.
+    """
+
     UNHELPFUL_MARKERS = (
         "the provided context does not contain",
         "the context does not contain",
@@ -46,6 +52,10 @@ class RAGService:
         return any(marker in lower for marker in self.UNHELPFUL_MARKERS)
 
     def _source_boosts_for_docs(self, question: str) -> dict[str, float]:
+        """Подсказки для retriver связанные с вопросами по документации.
+        Придает больше веса в сторону docs части корпуса
+        """
+
         q = question.lower()
         boosts = {"codesearchnet": -0.08}
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 from typing import AsyncIterator
@@ -8,8 +10,6 @@ from app.api.config import settings
 
 
 class LLMRateLimitError(RuntimeError):
-    """Raised when external LLM provider returns rate limit error."""
-
     def __init__(
         self,
         message: str = (
@@ -20,14 +20,28 @@ class LLMRateLimitError(RuntimeError):
         super().__init__(message)
 
 
+class LLMTemporaryUnavailableError(RuntimeError):
+    def __init__(
+        self,
+        message: str = (
+            "Сервис LLM временно недоступен. " "Попробуйте повторить запрос через минуту."
+        ),
+    ):
+        super().__init__(message)
+
+
 class LLMService:
+    """Асинхронный клиент для Gemini модели"""
+
     RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+    TEMPORARY_UNAVAILABLE_STATUSES = {500, 502, 503, 504}
 
     def __init__(self):
         self.provider = settings.llm_provider
         self.model = settings.llm_model
         self.api_key = settings.llm_api_key
         self.timeout = settings.request_timeout
+        self.api_base_url = settings.llm_api_base_url.rstrip("/")
 
     def is_configured(self) -> bool:
         return bool(self.api_key and self.provider == "gemini")
@@ -83,10 +97,16 @@ class LLMService:
             },
         }
 
-    @staticmethod
-    def _raise_for_llm_status(response: httpx.Response) -> None:
+    def _build_url(self, method: str) -> str:
+        return f"{self.api_base_url}/models/{self.model}:{method}?key={self.api_key}"
+
+    @classmethod
+    def _raise_for_llm_status(cls, response: httpx.Response) -> None:
         if response.status_code == 429:
             raise LLMRateLimitError()
+
+        if response.status_code in cls.TEMPORARY_UNAVAILABLE_STATUSES:
+            raise LLMTemporaryUnavailableError()
 
         response.raise_for_status()
 
@@ -101,10 +121,7 @@ class LLMService:
             raise RuntimeError("LLM is not configured.")
 
         temperature = settings.llm_temperature if temperature is None else temperature
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent?key={self.api_key}"
-        )
+        url = self._build_url("generateContent")
         body = self._build_body(prompt, max_new_tokens, temperature)
 
         last_error: Exception | None = None
@@ -128,7 +145,7 @@ class LLMService:
                 payload = response.json()
                 return self._extract_text_from_gemini_payload(payload)
 
-            except LLMRateLimitError:
+            except (LLMRateLimitError, LLMTemporaryUnavailableError):
                 raise
 
             except (httpx.HTTPError, httpx.TimeoutException) as exc:
@@ -139,6 +156,9 @@ class LLMService:
 
         if last_status_code == 429:
             raise LLMRateLimitError()
+
+        if last_status_code in self.TEMPORARY_UNAVAILABLE_STATUSES:
+            raise LLMTemporaryUnavailableError()
 
         if last_error:
             raise RuntimeError(f"LLM request failed: {last_error}") from last_error
@@ -156,10 +176,7 @@ class LLMService:
             raise RuntimeError("LLM is not configured.")
 
         temperature = settings.llm_temperature if temperature is None else temperature
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:streamGenerateContent?alt=sse&key={self.api_key}"
-        )
+        url = self._build_url("streamGenerateContent") + "&alt=sse"
         body = self._build_body(prompt, max_new_tokens, temperature)
 
         async with httpx.AsyncClient(timeout=None) as client:

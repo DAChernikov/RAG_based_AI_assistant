@@ -32,14 +32,20 @@ services:
         value: "2000"
       - key: LLM_PROVIDER
         value: gemini
+      - key: LLM_API_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta
       - key: LLM_MODEL
         value: gemini-2.5-flash
       - key: LLM_TEMPERATURE
         value: "0.2"
       - key: LLM_MAX_CONTEXT_CHARS
         value: "12000"
+      - key: LLM_RETRIES
+        value: "3"
+      - key: LLM_RETRY_BACKOFF_SEC
+        value: "3.0"
       - key: REQUEST_TIMEOUT
-        value: "60"
+        value: "90"
       - key: SQL_TOP_K
         value: "10"
       - key: SQL_SCHEMA_SOURCE
@@ -49,7 +55,7 @@ services:
       - key: SQL_MAX_REPAIR_ATTEMPTS
         value: "1"
       - key: SQL_MAX_NEW_TOKENS
-        value: "2000"
+        value: "900"
       - key: SQL_TEMPERATURE
         value: "0.0"
       - key: SQL_ENABLE_EXPLAIN_VALIDATION
@@ -101,7 +107,7 @@ services:
       - key: LOG_LEVEL
         value: INFO
       - key: REQUEST_TIMEOUT
-        value: "60"
+        value: "90"
       - key: STREAM_EDIT_INTERVAL_SEC
         value: "1.0"
       - key: STREAM_MIN_CHARS_DELTA

@@ -12,12 +12,10 @@ RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
 COPY pyproject.toml poetry.lock README.md /app/
 RUN poetry install --only api
 
-# CPU-only torch ставим отдельно, чтобы не ломать lock на macOS
 RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
     torch==2.9.0
 
-# Align runtime libraries with the retriever artifact saved in Colab.
 RUN pip install --no-cache-dir \
     sentence-transformers==5.4.1 \
     transformers==5.0.0 \

@@ -40,18 +40,15 @@ class PromptBuilder:
         context = PromptBuilder._build_context(retrieved, settings.llm_max_context_chars)
 
         return (
-            "You are a technical RAG assistant.\n"
-            "Answer only from the provided context.\n"
-            "Give a complete but concise answer. Do not stop mid-sentence.\n"
-            "If the context is relevant but incomplete, give the safest grounded answer.\n"
-            "Only say that the context is insufficient if the retrieved sources "
-            "are clearly unrelated.\n"
-            "If the user asks 'how to', provide short steps or a minimal example.\n"
-            "If you include code, commands, SQL, JSON, YAML, or config, wrap it in fenced "
-            "markdown code blocks with the correct language, for example ```python.\n\n"
-            f"QUESTION:\n{question}\n\n"
-            f"CONTEXT:\n{context}\n\n"
-            "ANSWER:"
+            "You are a technical assistant answering from retrieved project documentation.\n"
+            "Use the context below as the source of truth. If the context only partially "
+            "answers the question, give the best grounded answer and mention the limitation.\n"
+            "Keep the answer complete, practical, and concise.\n"
+            "For how-to questions, prefer short steps or a small example.\n"
+            "Use fenced markdown blocks for code, commands, SQL, JSON, YAML, or config.\n\n"
+            f"Question:\n{question}\n\n"
+            f"Context:\n{context}\n\n"
+            "Answer:"
         )
 
     @staticmethod
@@ -59,15 +56,13 @@ class PromptBuilder:
         context = PromptBuilder._build_context(retrieved, settings.llm_max_context_chars)
 
         return (
-            "You are a Python and data-engineering code assistant.\n"
-            "The retrieved context may contain code snippets with little or no prose.\n"
-            "Infer the answer from code, API names, function names, and surrounding text.\n"
-            "Give a complete answer and do not stop mid-sentence.\n"
-            "If snippets are relevant, explain the pattern briefly and give one minimal example.\n"
-            "Wrap every code example in a fenced markdown code block with the correct language, "
-            "for example ```python.\n"
-            "Do not say the context is missing if there is obviously relevant code.\n\n"
-            f"QUESTION:\n{question}\n\n"
-            f"CONTEXT:\n{context}\n\n"
-            "ANSWER:"
+            "You are a Python and developing code assistant.\n"
+            "The context may include short code fragments, API calls, function names, or "
+            "limited comments. Infer the useful pattern from the retrieved snippets, but "
+            "do not invent project-specific details that are not supported by the context.\n"
+            "Give a complete answer with one minimal example when it helps.\n"
+            "Wrap code examples in fenced markdown blocks with the appropriate language.\n\n"
+            f"Question:\n{question}\n\n"
+            f"Context:\n{context}\n\n"
+            "Answer:"
         )

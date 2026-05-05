@@ -10,7 +10,7 @@ from app.api.services.sql_prompt_builder import SQLPromptBuilder
 
 try:
     import psycopg
-except Exception:  # pragma: no cover - optional dependency/runtime env
+except ImportError:
     psycopg = None
 
 
@@ -43,6 +43,10 @@ class SQLValidationResult:
 
 
 class SQLService:
+    """Генератор и валидатор SQL кода по пользовательскому запросу на естественном языке.
+    Валидация SQL-комманды производится засчет EXPLAIN запроса сгенерированного LLM кода
+    """
+
     FORBIDDEN_KEYWORDS = (
         "insert",
         "update",
@@ -81,7 +85,39 @@ class SQLService:
         flags=re.IGNORECASE,
     )
     COLUMN_REF_PATTERN = re.compile(r"\b([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)\b")
-    CODE_FENCE_PATTERN = re.compile(r"```(?:sql)?\s*(.*?)```", flags=re.IGNORECASE | re.DOTALL)
+    CODE_FENCE_PATTERN = re.compile(
+        r"```(?:sql)?\s*(.*?)```",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    SQL_EXPLAIN_ERROR_MARKERS = (
+        "syntax error",
+        "relation",
+        "does not exist",
+        "column",
+        "operator does not exist",
+        "function",
+        "ambiguous",
+        "missing from-clause",
+        "invalid input syntax",
+        "permission denied",
+    )
+
+    EXPLAIN_INFRA_ERROR_MARKERS = (
+        "connection failed",
+        "could not connect",
+        "timeout",
+        "ssl error",
+        "certificate verify failed",
+        "connection refused",
+        "network",
+        "temporary failure",
+        "name or service not known",
+        "server closed the connection",
+        "terminating connection",
+        "psycopg is not installed",
+        "connection settings are incomplete",
+    )
 
     def __init__(self, retriever, llm_service):
         self.retriever = retriever
@@ -126,7 +162,9 @@ class SQLService:
         if marker:
             candidate = answer[marker.end() :].strip()
             candidate = re.split(
-                r"\n\s*(?:EXPLANATION|VALIDATION|SOURCES)\s*:", candidate, flags=re.I
+                r"\n\s*(?:EXPLANATION|VALIDATION|SOURCES)\s*:",
+                candidate,
+                flags=re.I,
             )[0]
             return cls._strip_trailing_semicolon(candidate)
 
@@ -171,24 +209,89 @@ class SQLService:
         tables, _ = cls.extract_table_refs(sql_text)
         return tables
 
-    @staticmethod
-    def _table_metadata_from_docs(schema_docs: list[dict]) -> dict[str, set[str]]:
+    @classmethod
+    def _infer_schema_table_from_doc(cls, doc: dict) -> tuple[str | None, str | None]:
+        metadata = doc.get("metadata") or {}
+        schema = str(metadata.get("schema") or "").strip().lower() or None
+        table = str(metadata.get("table") or "").strip().lower() or None
+        title = (doc.get("title") or "").strip().strip('"').lower()
+        doc_id = (doc.get("doc_id") or "").strip().strip('"').lower()
+        text = doc.get("text") or ""
+
+        for candidate in (title, doc_id):
+            match = re.search(r"([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)", candidate)
+            if match:
+                schema = schema or cls._normalize_identifier(match.group(1))
+                table = table or cls._normalize_identifier(match.group(2))
+                return schema, table
+
+        match = re.search(
+            r"\bTABLE\s+([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)",
+            text,
+            flags=re.I,
+        )
+        if match:
+            schema = schema or cls._normalize_identifier(match.group(1))
+            table = table or cls._normalize_identifier(match.group(2))
+
+        return schema, table
+
+    @classmethod
+    def _extract_columns_from_doc_text(cls, text: str) -> set[str]:
+        columns: set[str] = set()
+        in_columns_section = False
+
+        for raw_line in (text or "").splitlines():
+            line = raw_line.strip()
+            lowered = line.lower()
+
+            if lowered.startswith("columns:"):
+                in_columns_section = True
+                continue
+
+            if in_columns_section and lowered.endswith(":") and not lowered.startswith("columns:"):
+                if not lowered.startswith("- "):
+                    in_columns_section = False
+
+            if not in_columns_section or not line.startswith("- "):
+                continue
+
+            body = line[2:].strip()
+            if not body or "->" in body:
+                continue
+
+            match = re.match(r"([a-zA-Z_][\w]*)\b", body)
+            if match:
+                columns.add(cls._normalize_identifier(match.group(1)))
+
+        return columns
+
+    @classmethod
+    def _columns_from_doc(cls, doc: dict) -> set[str]:
+        metadata = doc.get("metadata") or {}
+        columns = {str(col).strip().lower() for col in metadata.get("columns") or []}
+        columns = {col for col in columns if col}
+        if columns:
+            return columns
+        return cls._extract_columns_from_doc_text(doc.get("text") or "")
+
+    @classmethod
+    def _table_metadata_from_docs(cls, schema_docs: list[dict]) -> dict[str, set[str]]:
         table_to_columns: dict[str, set[str]] = {}
 
         for doc in schema_docs:
+            schema, table = cls._infer_schema_table_from_doc(doc)
             title = (doc.get("title") or "").strip().lower()
-            metadata = doc.get("metadata") or {}
-            schema = str(metadata.get("schema") or "").strip().lower()
-            table = str(metadata.get("table") or "").strip().lower()
-            columns = {str(col).strip().lower() for col in metadata.get("columns") or []}
+            columns = cls._columns_from_doc(doc)
 
             candidates = set()
             if title:
                 candidates.add(title)
                 candidates.add(title.split(".")[-1])
+            if table:
+                candidates.add(table)
             if schema and table:
                 candidates.add(f"{schema}.{table}")
-                candidates.add(table)
 
             for candidate in candidates:
                 if candidate:
@@ -196,22 +299,21 @@ class SQLService:
 
         return table_to_columns
 
-    @staticmethod
-    def _allowed_tables_from_docs(schema_docs: list[dict]) -> list[str]:
+    @classmethod
+    def _allowed_tables_from_docs(cls, schema_docs: list[dict]) -> list[str]:
         allowed: list[str] = []
 
         for doc in schema_docs:
             title = (doc.get("title") or "").strip()
-            metadata = doc.get("metadata") or {}
-            schema = metadata.get("schema")
-            table = metadata.get("table")
+            schema, table = cls._infer_schema_table_from_doc(doc)
 
             candidates = []
             if title:
                 candidates.append(title)
+            if table:
+                candidates.append(table)
             if schema and table:
                 candidates.append(f"{schema}.{table}")
-                candidates.append(str(table))
 
             for candidate in candidates:
                 normalized = candidate.strip().strip('"').lower()
@@ -220,23 +322,21 @@ class SQLService:
 
         return allowed
 
-    @staticmethod
-    def _allowed_columns_from_docs(schema_docs: list[dict]) -> list[str]:
+    @classmethod
+    def _allowed_columns_from_docs(cls, schema_docs: list[dict]) -> list[str]:
         allowed: list[str] = []
 
         for doc in schema_docs:
-            metadata = doc.get("metadata") or {}
-            schema = str(metadata.get("schema") or "").strip().lower()
-            table = str(metadata.get("table") or "").strip().lower()
-            columns = metadata.get("columns") or []
+            schema, table = cls._infer_schema_table_from_doc(doc)
+            columns = cls._columns_from_doc(doc)
 
             for column in columns:
-                column = str(column).strip().lower()
-                if not column:
-                    continue
-                candidates = [f"{table}.{column}"] if table else []
+                candidates = []
+                if table:
+                    candidates.append(f"{table}.{column}")
                 if schema and table:
                     candidates.append(f"{schema}.{table}.{column}")
+
                 for candidate in candidates:
                     if candidate not in allowed:
                         allowed.append(candidate)
@@ -256,7 +356,6 @@ class SQLService:
             column = cls._normalize_identifier(column)
             table = alias_to_table.get(qualifier, qualifier)
 
-            # Skip schema.table references in FROM/JOIN. They are table refs, not column refs.
             if f"{qualifier}.{column}" in alias_to_table:
                 continue
 
@@ -274,6 +373,22 @@ class SQLService:
                 return keyword
         return None
 
+    @classmethod
+    def _is_explain_infra_error(cls, error: str | None) -> bool:
+        if not error:
+            return False
+
+        lowered = error.lower()
+        return any(marker in lowered for marker in cls.EXPLAIN_INFRA_ERROR_MARKERS)
+
+    @classmethod
+    def _is_explain_sql_error(cls, error: str | None) -> bool:
+        if not error:
+            return False
+
+        lowered = error.lower()
+        return any(marker in lowered for marker in cls.SQL_EXPLAIN_ERROR_MARKERS)
+
     async def _postgres_explain(self, sql_text: str) -> tuple[bool, str | None]:
         if not settings.sql_enable_explain_validation:
             return False, None
@@ -289,7 +404,9 @@ class SQLService:
                 settings.postgres_password,
             ]
         ):
-            return False, "Postgres connection settings are incomplete; EXPLAIN validation skipped."
+            return False, (
+                "Postgres connection settings are incomplete; " "EXPLAIN validation skipped."
+            )
 
         try:
             conn_kwargs = {
@@ -298,16 +415,27 @@ class SQLService:
                 "dbname": settings.postgres_db,
                 "user": settings.postgres_user,
                 "password": settings.postgres_password,
-                "sslmode": settings.postgres_sslmode,
+                "sslmode": settings.postgres_sslmode or "require",
                 "connect_timeout": int(settings.sql_explain_timeout_sec),
             }
-            with psycopg.connect(**conn_kwargs, autocommit=True, prepare_threshold=None) as conn:
+
+            with psycopg.connect(
+                **conn_kwargs,
+                autocommit=True,
+                prepare_threshold=None,
+            ) as conn:
                 with conn.cursor() as cur:
                     timeout_ms = int(settings.sql_explain_timeout_sec * 1000)
-                    cur.execute("SET statement_timeout = %s", (timeout_ms,))
+
+                    cur.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(timeout_ms),),
+                    )
                     cur.execute(f"EXPLAIN {sql_text}")
                     cur.fetchall()
+
             return True, None
+
         except Exception as exc:  # pragma: no cover - depends on external DB
             return True, str(exc)
 
@@ -371,10 +499,18 @@ class SQLService:
 
         explain_checked = False
         explain_error = None
+
         if not errors and settings.sql_enable_explain_validation:
             explain_checked, explain_error = await self._postgres_explain(sql_text)
-            if explain_error and "skipped" not in explain_error.lower():
-                errors.append(f"Postgres EXPLAIN failed: {explain_error}")
+
+            if explain_error:
+                if self._is_explain_infra_error(explain_error):
+                    explain_checked = False
+                    warnings.append("Postgres EXPLAIN validation was unavailable: " + explain_error)
+                elif self._is_explain_sql_error(explain_error):
+                    errors.append(f"Postgres EXPLAIN failed: {explain_error}")
+                else:
+                    errors.append(f"Postgres EXPLAIN failed: {explain_error}")
 
         return SQLValidationResult(
             is_valid=not errors,
@@ -499,10 +635,11 @@ class SQLService:
             answer = await self._generate_once(question, retrieved, effective_max_tokens)
             validation = await self.validate_sql(answer, retrieved)
 
-            # First recovery step: if the formatted answer has no extractable SQL, ask for SQL only.
             if not validation.sql:
                 candidate_answer = await self._generate_sql_only_once(
-                    question, retrieved, effective_max_tokens
+                    question,
+                    retrieved,
+                    effective_max_tokens,
                 )
                 candidate_validation = await self.validate_sql(candidate_answer, retrieved)
                 if candidate_validation.sql:
@@ -519,6 +656,7 @@ class SQLService:
                 previous_answer = answer
                 previous_validation = validation
                 attempts += 1
+
                 candidate_answer = await self._repair_once(
                     question=question,
                     schema_docs=retrieved,
@@ -529,7 +667,6 @@ class SQLService:
                 candidate_validation = await self.validate_sql(candidate_answer, retrieved)
                 candidate_validation.warnings.append(f"Repair attempts used: {attempts}")
 
-                # Do not replace an answer that contains SQL with a worse repair that has no SQL.
                 if previous_validation.sql and not candidate_validation.sql:
                     previous_validation.warnings.append(
                         f"Repair attempt {attempts} produced no SQL and was ignored."

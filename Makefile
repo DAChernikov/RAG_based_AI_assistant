@@ -20,6 +20,8 @@ fmt:
 lint:
 	poetry run ruff check app tests
 
+check: fmt lint test
+
 up:
 	docker compose up --build
 

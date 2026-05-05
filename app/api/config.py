@@ -6,9 +6,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    """Runtime настройки параметров окружения приложения.
+    Обозначены основные дефолты при отстуствии ENVIRONMENT VARIABLES (.env)
+    """
+
     app_env: str = "dev"
     log_level: str = "INFO"
-
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
@@ -26,7 +29,7 @@ class Settings(BaseSettings):
     top_k: int = 5
     doc_top_k: int = 5
     code_top_k: int = 3
-    max_new_tokens: int = 10000
+    max_new_tokens: int = 1000
     doc_max_new_tokens: int = 1500
     code_max_new_tokens: int = 2000
 
@@ -50,14 +53,15 @@ class Settings(BaseSettings):
     min_confident_doc_score: float = 0.45
 
     llm_provider: str = "gemini"
+    llm_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     llm_model: str = "gemini-2.5-flash"
     llm_api_key: str | None = None
     llm_temperature: float = 0.15
     llm_max_context_chars: int = 12000
-    llm_retries: int = 2
-    llm_retry_backoff_sec: float = 2.0
+    llm_retries: int = 3
+    llm_retry_backoff_sec: float = 3.0
 
-    request_timeout: float = 60.0
+    request_timeout: float = 90.0
     stream_edit_interval_sec: float = 1.0
     stream_min_chars_delta: int = 40
 
