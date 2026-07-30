@@ -1,23 +1,30 @@
 # RAG-based AI Assistant
 
-Прототип корпоративного AI-ассистента на основе RAG-системы для дипломной работы магистерской программы "Искусственный интеллект" НИУ ВШЭ "Разработка ИИ-ассистента на основе RAG-системы".
+MVP self-hosted RAG-ассистента для ответов по технической документации, шаблонам кода
+и метаданным PostgreSQL. FastAPI предоставляет HTTP API, Telegram-бот работает как его
+клиент. Генерация выполняется через локальный или self-hosted model server с
+OpenAI-compatible HTTP API; внешние коммерческие LLM API не используются.
 
-Сервис отвечает на вопросы по изолированной технической документации, шаблонам кода и структуре реляционной базы данных. 
-Основной пользовательский интерфейс — Telegram-бот, backend реализован на FastAPI.
+Проект постепенно развивается в многопользовательский продукт. Целевая архитектура и
+нереализованные компоненты описаны в
+[`docs/architecture/target-architecture.md`](docs/architecture/target-architecture.md),
+а порядок итераций — в [`docs/roadmap.md`](docs/roadmap.md).
 
-**Основной пользовательский интерфейс доступен по ссылке:** https://t.me/rag_based_ai_bot 
+## Что работает сейчас
 
-> Доступ открыт до окончания сдачи дипломной работы - `01.07.2026`
+- `/health`, `/ready`, `/ask` и `/ask/stream` на FastAPI;
+- baseline routing `rag_docs | rag_code | sql`;
+- retrieval из существующего локального корпуса;
+- скачивание retriever artifacts из S3-compatible storage при наличии конфигурации;
+- RAG-ответы через self-hosted OpenAI-compatible model API;
+- генерация SQL, статическая проверка таблиц и колонок, опциональный PostgreSQL `EXPLAIN`
+  и ограниченный repair;
+- Telegram-бот как API-клиент.
 
-## Основные сценарии прототипа
+Web UI, аутентификация, PostgreSQL application state, pgvector, Redis Streams, workers,
+source catalog, Web/Git/JDBC connectors, BGE-M3 и multi-label routing пока не реализованы.
 
-- поиск ответов по официальной документации Spark, Trino и Hive;
-- ответы на вопросы по Python/code corpus шаблонам;
-- генерация PostgreSQL-запросов по естественно-языковому описанию аналитической задачи;
-- проверка релевантности SQL-ответа через статическую валидацию таблиц/колонок и PostgreSQL команды `EXPLAIN`;
-- загрузка артефактов retriever из S3-хранилища.
-
-## Архитектура
+## Текущая схема
 
 ```text
 Telegram Bot / HTTP client
@@ -25,65 +32,106 @@ Telegram Bot / HTTP client
         v
 FastAPI API
         |
-        +-- RouterService
-        |      +-- rag_docs
-        |      +-- rag_code
-        |      +-- sql
-        |
-        +-- RetrieverLoader
-        |      +-- corpus.joblib
-        |      +-- corpus_emb.npy
-        |      +-- retriever_model/
-        |
+        +-- RouterService: rag_docs | rag_code | sql
+        +-- RetrieverLoader: existing local artifacts
         +-- RAGService
-        |      +-- context retrieval
-        |      +-- LLM answer generation
+        +-- SQLService: static validation + optional EXPLAIN/repair
         |
-        +-- SQLService
-               +-- schema-only retrieval
-               +-- SQL generation
-               +-- static validation
-               +-- PostgreSQL EXPLAIN validation
+        v
+Self-hosted OpenAI-compatible model API
 ```
 
-## Структура проекта
+Model weights не входят в репозиторий или Docker image. На macOS model server запускается
+нативно, чтобы использовать Apple Metal; API-контейнер обращается к нему через
+`host.docker.internal`.
 
-```text
-app/api/              FastAPI backend
-app/api/routes/       HTTP endpoints
-app/api/services/     RAG, SQL, LLM and artifact services
-app/bot/              Telegram bot
-tests/                Unit tests
-infra/                Dockerfiles for API and bot
-notebooks/            Retriever training/tuning and upload to S3
-render.yaml           Render deployment config
-```
+## Требования
 
-## Локальный запуск
+- Python 3.11 или 3.12;
+- Poetry 2;
+- Docker Compose — для контейнерного запуска;
+- Ollama или OpenAI-compatible server на базе llama.cpp — для генерации;
+- retriever artifacts локально либо read-only credentials для их существующего S3-источника.
+
+## Установка
 
 ```bash
-poetry install --with bot,dev
+make install
 cp .env.example .env
 ```
 
-Необходимо заполнить `.env` необходимыми ключами для GeminiAI, S3, Telegram и Postgres.
+Не добавляйте `.env` в Git. Все credentials задаются только через environment variables.
+`MODEL_API_TOKEN` для локального сервера обычно остаётся пустым.
 
-## Запуск API
+## Локальный model server и API
+
+### 1. Запустите model server нативно
+
+Вариант с Ollama:
+
+```bash
+ollama serve
+```
+
+В отдельном терминале вручную подготовьте модель:
+
+```bash
+ollama pull qwen2.5-coder:7b
+```
+
+Загрузка модели не автоматизирована проектом. Вместо Ollama можно запустить llama.cpp с
+OpenAI-compatible endpoint и указать его URL и model id в `.env`.
+
+### 2. Настройте `.env`
+
+Для API в Docker Compose:
+
+```env
+MODEL_API_BASE_URL=http://host.docker.internal:11434/v1
+GENERATION_MODEL=qwen2.5-coder:7b
+MODEL_API_TOKEN=
+```
+
+Для API, запущенного напрямую на macOS:
+
+```env
+MODEL_API_BASE_URL=http://127.0.0.1:11434/v1
+GENERATION_MODEL=qwen2.5-coder:7b
+MODEL_API_TOKEN=
+```
+
+При использовании другого OpenAI-compatible server измените URL и model id. Приложение
+вызывает только `{MODEL_API_BASE_URL}/chat/completions`.
+
+### 3. Запустите API
+
+На host:
 
 ```bash
 make run-api-reload
 ```
 
-Проверка состояния:
+Или в Docker Compose:
+
+```bash
+make up
+```
+
+Compose добавляет `host.docker.internal:host-gateway`: это сохраняет стандартный путь на
+macOS и даёт совместимый host alias на поддерживаемых Linux-установках Docker.
+
+### 4. Проверьте состояние
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
 ```
 
-## Проверка запросов к API
+`/ready` сообщает о готовности retriever artifacts и RAG runtime. Отсутствие автоматически
+загруженной generation model не является ошибкой сборки; доступность model server
+проверяется фактическим запросом.
 
-Вопрос по текстовой документации:
+### 5. Отправьте тестовый запрос
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ask \
@@ -91,71 +139,64 @@ curl -X POST http://127.0.0.1:8000/ask \
   -d '{"question":"What is Apache Spark?"}'
 ```
 
-Вопрос по шаблону кода:
+Streaming endpoint:
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/ask/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How do I safely read a nested Python dictionary?"}'
+```
+
+SQL baseline:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
-  -d '{"question":"How to sort list in Python?"}'
+  -d '{"question":"Show revenue by customer segment","mode":"sql","top_k":10}'
 ```
 
-Вопрос по актуальному SQL-коду:
+## Telegram-бот
 
-```bash
-curl -X POST http://127.0.0.1:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question":"Convert daily order revenue from EUR to USD","mode":"sql","top_k":10}'
+Для запуска на host:
+
+```env
+API_BASE_URL=http://127.0.0.1:8000
+TELEGRAM_BOT_TOKEN=
 ```
-
-## Запуск Telegram-бота
 
 ```bash
 make run-bot
 ```
 
-Для локального запуска в `.env` используйте:
+Для Docker Compose используйте `API_BASE_URL=http://api:8000`. Bot token хранится только
+в локальном `.env` или secret store.
 
-```env
-API_BASE_URL=http://127.0.0.1:8000   # вместо 127.0.0.1 можно также localhost
-```
+## Конфигурация Model Gateway
 
-Для Docker Compose внутри контейнерной сети:
+| Variable | Назначение |
+| --- | --- |
+| `MODEL_API_BASE_URL` | Base URL self-hosted OpenAI-compatible API |
+| `GENERATION_MODEL` | Model id, передаваемый в `chat/completions` |
+| `MODEL_API_TOKEN` | Опциональный Bearer token; пустое значение не создаёт header |
+| `MODEL_REQUEST_TIMEOUT` | Timeout запроса в секундах |
+| `MODEL_RETRIES` | Число повторов после первого запроса |
+| `MODEL_RETRY_BACKOFF_SEC` | Базовая задержка линейного backoff |
+| `MODEL_TEMPERATURE` | Default temperature |
+| `MODEL_MAX_CONTEXT_CHARS` | Временный символьный лимит prompt context |
 
-```env
-API_BASE_URL=http://api:8000
-```
+Старые Gemini-specific `LLM_PROVIDER`, `LLM_API_BASE_URL`, `LLM_MODEL` и `LLM_API_KEY`
+не поддерживаются и не используются как fallback.
 
-В `render.com` используется сгенерированный при деплое адрес API-сервиса.
-На текущий момент `API_BASE_URL` от `render`: https://rag-ai-assistant-api.onrender.com, 
-соответственно использовать сервис можно также по этой ссылке.
-
-## Docker Compose вариант запуска
-
-```bash
-make up     # Поднять композицию Docker-контейнеров
-make down   # Отключить композицию Docker-контейнеров
-```
-
-## Render
-
-Проект адаптирован для деплоя на сайте Render.com.
-Для этого в `render.yaml` описаны два сервиса:
-
-- `rag-ai-assistant-api` — FastAPI backend;
-- `rag-ai-assistant-bot` — Telegram worker.
-
-Все секреты задаются через Environment Variables проекта на платформе. На момент создания прототипа в публичном доступе доступны следующие ссылки:
-1. Основной пользовательский интерфейс ассистента (Telegram-бот): https://t.me/rag_based_ai_bot
-2. Публичный API base URL: https://rag-ai-assistant-api.onrender.com
-
-> Перечисленные ссылки станут недоступными после `01.07.2026`
-
-## Примечания
-
-**В проекте также встроены проверки качества кода и тесты**
+## Проверки
 
 ```bash
-make fmt
+make format-check
 make lint
 make test
+make check
+docker compose config --quiet
+git diff --check
 ```
+
+`make fmt` применяет Black и isort, поэтому используйте его только для намеренного
+форматирования.
