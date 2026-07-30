@@ -1,26 +1,113 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_APP_DB:-rag}
+      POSTGRES_USER: ${POSTGRES_APP_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:-rag-dev-only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_APP_USER:-rag} -d ${POSTGRES_APP_DB:-rag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 320m
+    restart: unless-stopped
+
   api:
     build:
       context: .
       dockerfile: infra/api.Dockerfile
-    container_name: rag_api
+    environment:
+      INFERENCE_EXECUTION_MODE: queued
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:-rag-dev-only}@postgres:5432/${POSTGRES_APP_DB:-rag}
+      REDIS_URL: redis://redis:6379/0
+      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
+      GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
+      MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
     env_file:
-      - .env
+      - path: .env
+        required: false
     ports:
       - "8000:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/worker.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:-rag-dev-only}@postgres:5432/${POSTGRES_APP_DB:-rag}
+      REDIS_URL: redis://redis:6379/0
+      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
+      GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
+      MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
+      WORKER_ID: ${WORKER_ID:-worker-1}
+      ARTIFACTS_DIR: /app/artifacts
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./artifacts:/app/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    stop_grace_period: 2m
+    mem_limit: 6g
     restart: unless-stopped
 
   bot:
     build:
       context: .
       dockerfile: infra/bot.Dockerfile
-    container_name: rag_bot
+    environment:
+      API_BASE_URL: http://api:8000
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       - api
+    profiles: ["bot"]
+    mem_limit: 256m
     restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
