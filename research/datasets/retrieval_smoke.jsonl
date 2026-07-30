@@ -1,0 +1,11 @@
+{"record_type":"document","id":"doc_ru_spark","kind":"documentation","text":"Apache Spark — распределённый движок обработки данных."}
+{"record_type":"document","id":"doc_en_trino","kind":"documentation","text":"Trino is a distributed SQL query engine."}
+{"record_type":"document","id":"code_python_safe_get","kind":"code","text":"def safe_get(data, key, default=None): return data.get(key, default)"}
+{"record_type":"document","id":"sql_revenue","kind":"sql","text":"SELECT day, SUM(revenue) FROM orders GROUP BY day"}
+{"record_type":"document","id":"schema_orders","kind":"database_schema","text":"orders(order_id bigint, customer_id bigint, revenue numeric)"}
+{"record_type":"query","id":"q_ru_docs","query":"Что такое Apache Spark?","labels":{"doc_ru_spark":2}}
+{"record_type":"query","id":"q_en_docs","query":"What is Trino?","labels":{"doc_en_trino":2}}
+{"record_type":"query","id":"q_code","query":"How to safely read a Python dictionary key?","labels":{"code_python_safe_get":2}}
+{"record_type":"query","id":"q_sql","query":"Write SQL for revenue by day","labels":{"sql_revenue":2,"schema_orders":1}}
+{"record_type":"query","id":"q_hybrid","query":"Using the orders schema, explain and write revenue SQL","labels":{"schema_orders":2,"sql_revenue":2}}
+{"record_type":"query","id":"q_negative","query":"How to edit a video?","labels":{}}

@@ -193,3 +193,13 @@ data/*
 # Local notebooks outputs / tmp
 *.tmp
 *.bak
+
+# Research outputs, downloaded models, and local caches
+research/results/*
+!research/results/.gitkeep
+research/models/
+research/cache/
+*.gguf
+*.safetensors
+*.pt
+*.pth

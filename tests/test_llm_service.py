@@ -285,3 +285,45 @@ async def test_injected_http_client_is_supported_and_caller_owned():
     await service.aclose()
     assert client.is_closed is False
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (httpx.Response(200, json={"data": []}), {"ready": True, "status": "available"}),
+        (httpx.Response(404), {"ready": False, "status": "unsupported"}),
+    ],
+)
+async def test_model_readiness_available_and_unsupported(response, expected):
+    service = OpenAICompatibleLLMService(
+        api_base_url="http://model.test/v1",
+        model="local-model",
+        transport=httpx.MockTransport(lambda request: response),
+    )
+
+    async with service:
+        assert await service.readiness() == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (httpx.ConnectError("refused"), "unavailable"),
+        (httpx.ReadTimeout("timeout"), "timeout"),
+    ],
+)
+async def test_model_readiness_refused_and_timeout(error, status):
+    def handler(request):
+        error.request = request
+        raise error
+
+    service = OpenAICompatibleLLMService(
+        api_base_url="http://model.test/v1",
+        model="local-model",
+        transport=httpx.MockTransport(handler),
+    )
+
+    async with service:
+        assert await service.readiness() == {"ready": False, "status": status}

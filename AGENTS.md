@@ -14,3 +14,8 @@
 - End every iteration by reviewing the complete diff and running the available checks.
 - Do not perform destructive remote actions, force operations, remote data writes, or branch
   deletion without explicit approval.
+- Classify every iteration as `internal`, `admin-visible`, or `user-visible`. For
+  `admin-visible` and `user-visible` work, update `docs/testing/` with commands, expected
+  results, negative cases, cleanup, and troubleshooting.
+- Final reports must distinguish automated tests, integration tests, manual tests performed
+  by Codex, owner-required manual tests, and checks that could not be performed.

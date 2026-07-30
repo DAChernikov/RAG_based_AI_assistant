@@ -78,6 +78,33 @@ class OpenAICompatibleLLMService:
     def is_configured(self) -> bool:
         return bool(self.api_base_url and self.model)
 
+    async def readiness(self) -> dict[str, str | bool]:
+        if not self.is_configured():
+            return {"ready": False, "status": "not_configured"}
+
+        path = settings.model_readiness_path
+        url = f"{self.api_base_url}{path if path.startswith('/') else '/' + path}"
+        try:
+            response = await self._client.get(
+                url,
+                headers=self._headers(),
+                timeout=settings.model_readiness_timeout,
+            )
+        except httpx.TimeoutException:
+            return {"ready": False, "status": "timeout"}
+        except httpx.TransportError:
+            return {"ready": False, "status": "unavailable"}
+
+        if response.status_code in {404, 405, 501}:
+            return {"ready": False, "status": "unsupported"}
+        if response.status_code == 429:
+            return {"ready": False, "status": "busy"}
+        if response.status_code >= 500:
+            return {"ready": False, "status": "unavailable"}
+        if response.is_success:
+            return {"ready": True, "status": "available"}
+        return {"ready": False, "status": "error"}
+
     @property
     def endpoint(self) -> str:
         return f"{self.api_base_url}/chat/completions"
