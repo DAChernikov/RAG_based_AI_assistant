@@ -17,10 +17,14 @@ fmt:
 	poetry run black app tests
 	poetry run isort app tests
 
+format-check:
+	poetry run black --check app tests
+	poetry run isort --check-only app tests
+
 lint:
 	poetry run ruff check app tests
 
-check: fmt lint test
+check: format-check lint test
 
 up:
 	docker compose up --build
