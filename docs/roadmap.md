@@ -19,21 +19,17 @@ infrastructure.
 
 ## Iteration 2 — Application state and asynchronous inference foundation
 
-Proposed scope for separate approval:
+Status: implemented on `feature/product-v1`.
 
-- define PostgreSQL application-state schema and migrations for users/tenants, conversations,
-  messages, jobs, and answer/source records;
-- define versioned job and SSE event contracts;
-- introduce Redis Streams and an inference worker with consumer groups, acknowledgements,
-  idempotency, retry limits, and dead-letter handling;
-- keep `/ask` and `/ask/stream` backward compatible while moving execution behind the job
-  boundary;
-- add local Compose services, integration tests, and observability basics;
-- avoid source connectors, pgvector migration, and authentication UI until their contracts
-  are separately reviewed.
+- PostgreSQL application-state schema and Alembic migration;
+- Redis Streams, consumer group, bounded retry, DLQ, pending reclaim and heartbeat;
+- versioned jobs/events, resumable SSE and async job endpoints;
+- idempotent answers and conversation history;
+- direct/queued compatibility, local Compose profiles and structured metric logs;
+- safe artifact staging and reproducible research workspace.
 
-Secrets, S3 model registry writes, Neon access, and large model downloads remain out of scope
-unless explicitly authorized.
+Authentication, source connectors, pgvector, Neon access, S3 model writes and automatic model
+downloads remain out of scope.
 
 ## Later planned stages
 

@@ -92,9 +92,9 @@ is a delivery mechanism for user inference and ingestion jobs, not the system of
 10. The final answer, citations, route plan, SQL validation, latency/token metrics, and
     feedback are persisted.
 
-The current MVP calls the model synchronously from the API and uses a single-label heuristic
-router. Redis, workers, persistence, multi-label plans, hybrid retrieval, and AST validation
-are future work.
+Iteration 2 implements PostgreSQL state, Redis inference jobs/events, one inference worker,
+heartbeat, direct/queued modes and versioned SSE. The router remains a single-label heuristic;
+multi-label plans, hybrid retrieval, pgvector and AST validation are future work.
 
 ## Knowledge source catalog
 
@@ -187,8 +187,9 @@ moves the artifact into a local cache, and activates it only after verification.
 current 10 GB storage limit, the registry should retain one active quantized generator, one
 embedding model, manifests, and minimal extra artifacts.
 
-The existing S3 download path for retriever artifacts remains unchanged. Model registry
-uploads and remote S3 writes are not implemented.
+The existing S3 download path for retriever artifacts now uses lazy client creation, bounded
+safe ZIP staging, smoke validation and atomic activation. The trusted `joblib` format remains
+a documented risk. Model registry uploads and remote S3 writes are not implemented.
 
 ## Neon demonstration JDBC source
 

@@ -1,202 +1,201 @@
 # RAG-based AI Assistant
 
-MVP self-hosted RAG-ассистента для ответов по технической документации, шаблонам кода
-и метаданным PostgreSQL. FastAPI предоставляет HTTP API, Telegram-бот работает как его
-клиент. Генерация выполняется через локальный или self-hosted model server с
-OpenAI-compatible HTTP API; внешние коммерческие LLM API не используются.
+Self-hosted RAG-ассистент с FastAPI, Telegram-клиентом, PostgreSQL application state,
+Redis Streams и отдельным inference worker. Генерация выполняется только через локальный или
+self-hosted OpenAI-compatible HTTP API. Коммерческие внешние LLM API не используются.
 
-Проект постепенно развивается в многопользовательский продукт. Целевая архитектура и
-нереализованные компоненты описаны в
-[`docs/architecture/target-architecture.md`](docs/architecture/target-architecture.md),
-а порядок итераций — в [`docs/roadmap.md`](docs/roadmap.md).
+Iteration 2 реализует два режима:
 
-## Что работает сейчас
+- `direct` — совместимый диагностический путь, где API загружает текущий retriever;
+- `queued` — основной продуктовый путь: API сохраняет запрос в PostgreSQL, отправляет job в
+  Redis Streams, а retriever и model client живут в inference worker.
 
-- `/health`, `/ready`, `/ask` и `/ask/stream` на FastAPI;
-- baseline routing `rag_docs | rag_code | sql`;
-- retrieval из существующего локального корпуса;
-- скачивание retriever artifacts из S3-compatible storage при наличии конфигурации;
-- RAG-ответы через self-hosted OpenAI-compatible model API;
-- генерация SQL, статическая проверка таблиц и колонок, опциональный PostgreSQL `EXPLAIN`
-  и ограниченный repair;
-- Telegram-бот как API-клиент.
+Production authentication/RBAC, Web UI, source connectors, pgvector и multi-label retrieval
+пока не реализованы. Versioned job endpoints являются development-only до появления
+authentication.
 
-Web UI, аутентификация, PostgreSQL application state, pgvector, Redis Streams, workers,
-source catalog, Web/Git/JDBC connectors, BGE-M3 и multi-label routing пока не реализованы.
-
-## Текущая схема
+## Реализованная runtime-схема
 
 ```text
-Telegram Bot / HTTP client
-        |
-        v
-FastAPI API
-        |
-        +-- RouterService: rag_docs | rag_code | sql
-        +-- RetrieverLoader: existing local artifacts
-        +-- RAGService
-        +-- SQLService: static validation + optional EXPLAIN/repair
-        |
-        v
-Self-hosted OpenAI-compatible model API
+Telegram / HTTP client
+          |
+          v
+      FastAPI API ----------------> PostgreSQL 16 (system of record)
+          |                                |
+          +------ Redis Streams jobs ------+
+                         |
+                         v
+                 inference worker
+                  |             |
+                  v             v
+          current retriever   self-hosted model API
 ```
 
-Model weights не входят в репозиторий или Docker image. На macOS model server запускается
-нативно, чтобы использовать Apple Metal; API-контейнер обращается к нему через
-`host.docker.internal`.
+Redis хранит delivery/events/heartbeat, но не является единственным хранилищем результата.
+Conversation, messages, jobs, answers и sources сохраняются в PostgreSQL. Token events имеют
+ограниченную retention и не записываются по одному в PostgreSQL.
 
-## Требования
-
-- Python 3.11 или 3.12;
-- Poetry 2;
-- Docker Compose — для контейнерного запуска;
-- Ollama или OpenAI-compatible server на базе llama.cpp — для генерации;
-- retriever artifacts локально либо read-only credentials для их существующего S3-источника.
-
-## Установка
+## Быстрый queued-запуск
 
 ```bash
 make install
 cp .env.example .env
+make infra-up
+make migrate
+make seed-dev
+make run-worker
+make run-api
 ```
 
-Не добавляйте `.env` в Git. Все credentials задаются только через environment variables.
-`MODEL_API_TOKEN` для локального сервера обычно остаётся пустым.
-
-## Локальный model server и API
-
-### 1. Запустите model server нативно
-
-Вариант с Ollama:
+Перед worker запустите Ollama нативно:
 
 ```bash
 ollama serve
-```
-
-В отдельном терминале вручную подготовьте модель:
-
-```bash
 ollama pull qwen2.5-coder:7b
 ```
 
-Загрузка модели не автоматизирована проектом. Вместо Ollama можно запустить llama.cpp с
-OpenAI-compatible endpoint и указать его URL и model id в `.env`.
+Загрузка модели выполняется вручную и никогда не происходит при Docker build, import или
+unit tests.
 
-### 2. Настройте `.env`
-
-Для API в Docker Compose:
-
-```env
-MODEL_API_BASE_URL=http://host.docker.internal:11434/v1
-GENERATION_MODEL=qwen2.5-coder:7b
-MODEL_API_TOKEN=
-```
-
-Для API, запущенного напрямую на macOS:
-
-```env
-MODEL_API_BASE_URL=http://127.0.0.1:11434/v1
-GENERATION_MODEL=qwen2.5-coder:7b
-MODEL_API_TOKEN=
-```
-
-При использовании другого OpenAI-compatible server измените URL и model id. Приложение
-вызывает только `{MODEL_API_BASE_URL}/chat/completions`.
-
-### 3. Запустите API
-
-На host:
-
-```bash
-make run-api-reload
-```
-
-Или в Docker Compose:
-
-```bash
-make up
-```
-
-Compose добавляет `host.docker.internal:host-gateway`: это сохраняет стандартный путь на
-macOS и даёт совместимый host alias на поддерживаемых Linux-установках Docker.
-
-### 4. Проверьте состояние
+Проверка:
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
-```
-
-`/ready` сообщает о готовности retriever artifacts и RAG runtime. Отсутствие автоматически
-загруженной generation model не является ошибкой сборки; доступность model server
-проверяется фактическим запросом.
-
-### 5. Отправьте тестовый запрос
-
-```bash
 curl -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"question":"What is Apache Spark?"}'
 ```
 
-Streaming endpoint:
+`/health` проверяет только liveness API process. `/ready` в queued mode проверяет PostgreSQL,
+Redis и свежий worker heartbeat, включая retriever/model readiness. Отказ queued dependencies
+никогда не вызывает silent fallback в direct mode.
 
-```bash
-curl -N -X POST http://127.0.0.1:8000/ask/stream \
-  -H "Content-Type: application/json" \
-  -d '{"question":"How do I safely read a nested Python dictionary?"}'
+## API
+
+Backward-compatible:
+
+- `GET /health`
+- `GET /ready`
+- `POST /ask`
+- `POST /ask/stream`
+
+Development-only asynchronous API:
+
+- `POST /v1/inference-jobs`
+- `GET /v1/inference-jobs/{job_id}`
+- `GET /v1/inference-jobs/{job_id}/events`
+- `GET /v1/conversations/{conversation_id}`
+
+`AskRequest` получил только optional `conversation_id`. `Idempotency-Key` поддерживается для
+`/ask`, `/ask/stream` и создания async job. Одинаковый key и payload возвращает существующий
+job; другой payload с тем же key получает HTTP 409.
+
+Queued SSE содержит:
+
+```text
+id: <redis-stream-id>
+event: queued|started|meta|token|retrying|completed|failed
+data: <versioned JSON contract>
 ```
 
-SQL baseline:
+`Last-Event-ID` возобновляет чтение. Legacy `/ask/stream` дополнительно сохраняет поля
+`type`/`data`; direct mode использует прежний SSE формат. Полный контракт описан в
+[`docs/api/inference-contracts.md`](docs/api/inference-contracts.md).
+
+## Application state и migrations
+
+PostgreSQL является локальным application database. Neon зарезервирован для будущего JDBC
+metadata demo и в Iteration 2 не используется.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question":"Show revenue by customer segment","mode":"sql","top_k":10}'
+make migrate
+make seed-dev
 ```
 
-## Telegram-бот
+Миграции не запускаются при import или API startup. Compatibility identity создаётся только
+управляемой seed-командой. Анонимный API не принимает `tenant_id`/`user_id`.
 
-Для запуска на host:
+## MacBook Air 24 GB profile
+
+Рекомендуемый профиль:
+
+- PostgreSQL, Redis и API — Docker/OrbStack;
+- Ollama — нативно на macOS для Metal;
+- worker — один процесс; нативно для MPS либо CPU Docker container;
+- одна generation model в памяти;
+- API в queued mode не импортирует и не загружает Sentence Transformer.
+
+Для native API/worker задайте host URLs:
 
 ```env
-API_BASE_URL=http://127.0.0.1:8000
-TELEGRAM_BOT_TOKEN=
+DATABASE_URL=postgresql+psycopg://rag:<local-password>@127.0.0.1:5432/rag
+REDIS_URL=redis://127.0.0.1:6379/0
+MODEL_API_BASE_URL=http://127.0.0.1:11434/v1
 ```
 
-```bash
-make run-bot
-```
+Compose API/worker используют `host.docker.internal`. API ограничен 512 MB, PostgreSQL —
+512 MB, Redis — 320 MB с `noeviction`, worker — 6 GB. Redis Streams ограничены maxlen/TTL.
 
-Для Docker Compose используйте `API_BASE_URL=http://api:8000`. Bot token хранится только
-в локальном `.env` или secret store.
+## Linux/CI CPU profile
 
-## Конфигурация Model Gateway
+`infra/worker.Dockerfile` устанавливает один Poetry-resolved CPU-compatible ML stack без
+повторной установки Torch/Transformers. Linux worker явно выбирает `torch==2.9.0+cpu` из
+PyTorch CPU index; взаимно исключённые platform metadata в lock не устанавливаются в image.
+API image ставит только `api` group и не содержит Torch, Transformers, Sentence Transformers,
+Jupyter, research tooling или model weights.
 
-| Variable | Назначение |
+## Safe retriever artifacts
+
+S3 client создаётся лениво только при фактической загрузке. Download:
+
+1. проверяет полную конфигурацию и размер объекта;
+2. пишет во временную sibling staging directory;
+3. проверяет ZIP paths, traversal, absolute paths, symlinks и size limit;
+4. распаковывает вручную;
+5. выполняет required-files и smoke validation;
+6. атомарно заменяет active directory с rollback;
+7. удаляет только собственные staging/backup directories.
+
+Текущий corpus использует `joblib`; он должен загружаться только из управляемого доверенного
+artifact key. Полная замена pickle-compatible формата остаётся security debt.
+
+## Research
+
+Старые notebooks удалены. Новый контур находится в [`research/README.md`](research/README.md).
+Notebooks не содержат outputs/execution counts и используют reusable `research/src`. Heavy
+models и training opt-in; `RUN_TRAINING = False` по умолчанию. Результаты и weights ignored.
+
+## Основные environment variables
+
+| Variable | Purpose |
 | --- | --- |
-| `MODEL_API_BASE_URL` | Base URL self-hosted OpenAI-compatible API |
-| `GENERATION_MODEL` | Model id, передаваемый в `chat/completions` |
-| `MODEL_API_TOKEN` | Опциональный Bearer token; пустое значение не создаёт header |
-| `MODEL_REQUEST_TIMEOUT` | Timeout запроса в секундах |
-| `MODEL_RETRIES` | Число повторов после первого запроса |
-| `MODEL_RETRY_BACKOFF_SEC` | Базовая задержка линейного backoff |
-| `MODEL_TEMPERATURE` | Default temperature |
-| `MODEL_MAX_CONTEXT_CHARS` | Временный символьный лимит prompt context |
+| `INFERENCE_EXECUTION_MODE` | `direct` или `queued` |
+| `DATABASE_URL` | локальный PostgreSQL application state |
+| `REDIS_URL` | Redis Streams transport |
+| `MODEL_API_BASE_URL` | self-hosted OpenAI-compatible base URL |
+| `GENERATION_MODEL` | generator model id |
+| `MODEL_API_TOKEN` | optional Bearer token |
+| `MODEL_READINESS_PATH` | лёгкий capability endpoint, default `/models` |
+| `INFERENCE_WAIT_TIMEOUT_SEC` | ожидание backward-compatible `/ask` |
+| `INFERENCE_MAX_ATTEMPTS` | bounded worker attempts |
+| `WORKER_ID` | стабильный worker identity |
 
-Старые Gemini-specific `LLM_PROVIDER`, `LLM_API_BASE_URL`, `LLM_MODEL` и `LLM_API_KEY`
-не поддерживаются и не используются как fallback.
+Остальные defaults и safe placeholders находятся в `.env.example`. Secrets не должны
+попадать в Git, docs, logs или Redis contracts.
 
-## Проверки
+## Commands
 
 ```bash
 make format-check
 make lint
 make test
-make check
+make infra-up
+make migrate
+make seed-dev
+make integration-test
+make smoke-test
 docker compose config --quiet
-git diff --check
 ```
 
-`make fmt` применяет Black и isort, поэтому используйте его только для намеренного
-форматирования.
+Подробное ручное тестирование: [Iteration 02 manual guide](docs/testing/iteration-02-manual.md).
