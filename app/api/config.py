@@ -52,16 +52,15 @@ class Settings(BaseSettings):
     min_confident_code_score: float = 0.58
     min_confident_doc_score: float = 0.45
 
-    llm_provider: str = "gemini"
-    llm_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    llm_model: str = "gemini-2.5-flash"
-    llm_api_key: str | None = None
-    llm_temperature: float = 0.15
-    llm_max_context_chars: int = 12000
-    llm_retries: int = 3
-    llm_retry_backoff_sec: float = 3.0
+    model_api_base_url: str = "http://127.0.0.1:11434/v1"
+    generation_model: str = "qwen2.5-coder:7b"
+    model_api_token: str | None = None
+    model_request_timeout: float = 90.0
+    model_retries: int = 3
+    model_retry_backoff_sec: float = 3.0
+    model_temperature: float = 0.15
+    model_max_context_chars: int = 12000
 
-    request_timeout: float = 90.0
     stream_edit_interval_sec: float = 1.0
     stream_min_chars_delta: int = 40
 
@@ -70,6 +69,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        protected_namespaces=("settings_",),
     )
 
 

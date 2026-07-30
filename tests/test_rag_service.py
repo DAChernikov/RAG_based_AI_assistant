@@ -38,6 +38,14 @@ class DummyLLM:
         return False
 
 
+class FakeModelClient:
+    def is_configured(self) -> bool:
+        return True
+
+    async def generate(self, *args, **kwargs):
+        return "Apache Spark is a unified analytics engine for large-scale data processing."
+
+
 @pytest.mark.asyncio
 async def test_rag_service_returns_answer_and_retrieved():
     service = RAGService(retriever=DummyRetriever(), llm_service=DummyLLM())
@@ -55,3 +63,18 @@ async def test_rag_service_returns_answer_and_retrieved():
     assert len(result["retrieved"]) == 2
     assert result["confidence"] is not None
     assert result["confidence"]["top_k"] == 2
+
+
+@pytest.mark.asyncio
+async def test_rag_service_works_with_fake_model_client():
+    service = RAGService(retriever=DummyRetriever(), llm_service=FakeModelClient())
+
+    result = await service.ask(
+        question="What is Apache Spark?",
+        top_k=2,
+        max_new_tokens=128,
+        mode="rag_docs",
+    )
+
+    assert result["answer"].startswith("Apache Spark")
+    assert result["mode"] == "rag_docs"

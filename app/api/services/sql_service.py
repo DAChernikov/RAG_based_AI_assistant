@@ -532,7 +532,7 @@ class SQLService:
             question=question,
             schema_docs=schema_docs,
             dialect=settings.sql_dialect,
-            max_context_chars=settings.llm_max_context_chars,
+            max_context_chars=settings.model_max_context_chars,
         )
         return await self.llm_service.generate(
             prompt=prompt,
@@ -547,7 +547,7 @@ class SQLService:
             question=question,
             schema_docs=schema_docs,
             dialect=settings.sql_dialect,
-            max_context_chars=settings.llm_max_context_chars,
+            max_context_chars=settings.model_max_context_chars,
         )
         sql_text = await self.llm_service.generate(
             prompt=prompt,
@@ -576,7 +576,7 @@ class SQLService:
             previous_answer=previous_answer,
             validation_errors=validation_errors,
             dialect=settings.sql_dialect,
-            max_context_chars=settings.llm_max_context_chars,
+            max_context_chars=settings.model_max_context_chars,
         )
         return await self.llm_service.generate(
             prompt=prompt,

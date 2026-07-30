@@ -15,7 +15,7 @@ async def lifespan(app: FastAPI):
     runtime = {
         "artifacts_ready": False,
         "rag_ready": False,
-        "llm_name": settings.llm_model,
+        "llm_name": settings.generation_model,
         "artifacts_dir": settings.artifacts_dir,
         "rag_service": None,
         "retriever": None,
@@ -42,7 +42,12 @@ async def lifespan(app: FastAPI):
         runtime["startup_error"] = str(exc)
 
     app.state.runtime = runtime
-    yield
+    try:
+        yield
+    finally:
+        llm_service = runtime.get("llm_service")
+        if llm_service is not None:
+            await llm_service.aclose()
 
 
 app = FastAPI(

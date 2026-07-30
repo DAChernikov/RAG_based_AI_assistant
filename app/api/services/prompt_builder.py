@@ -37,7 +37,7 @@ class PromptBuilder:
 
     @staticmethod
     def _build_docs_prompt(question: str, retrieved: list[dict]) -> str:
-        context = PromptBuilder._build_context(retrieved, settings.llm_max_context_chars)
+        context = PromptBuilder._build_context(retrieved, settings.model_max_context_chars)
 
         return (
             "You are a technical assistant answering from retrieved project documentation.\n"
@@ -53,7 +53,7 @@ class PromptBuilder:
 
     @staticmethod
     def _build_code_prompt(question: str, retrieved: list[dict]) -> str:
-        context = PromptBuilder._build_context(retrieved, settings.llm_max_context_chars)
+        context = PromptBuilder._build_context(retrieved, settings.model_max_context_chars)
 
         return (
             "You are a Python and developing code assistant.\n"

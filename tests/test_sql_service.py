@@ -58,7 +58,7 @@ class DummyRetriever:
         ]
 
 
-class DummyLLM:
+class FakeModelClient:
     def is_configured(self) -> bool:
         return True
 
@@ -86,7 +86,7 @@ async def test_sql_service_uses_database_schema_source_filter(monkeypatch):
     )
 
     retriever = DummyRetriever()
-    service = SQLService(retriever=retriever, llm_service=DummyLLM())
+    service = SQLService(retriever=retriever, llm_service=FakeModelClient())
 
     result = await service.ask(question="Show revenue by customer segment", top_k=10)
 
@@ -99,7 +99,7 @@ async def test_sql_service_uses_database_schema_source_filter(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sql_validation_rejects_forbidden_keyword():
-    service = SQLService(retriever=DummyRetriever(), llm_service=DummyLLM())
+    service = SQLService(retriever=DummyRetriever(), llm_service=FakeModelClient())
     docs = DummyRetriever().search("q", source_filter=["database_schema"])
 
     validation = await service.validate_sql("SQL:\nDROP TABLE rag_kg.orders", docs)

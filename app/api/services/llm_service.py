@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -30,75 +30,84 @@ class LLMTemporaryUnavailableError(RuntimeError):
         super().__init__(message)
 
 
-class LLMService:
-    """Асинхронный клиент для Gemini модели"""
+class OpenAICompatibleLLMService:
+    """Async client for a self-hosted OpenAI-compatible chat completions API."""
 
     RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
     TEMPORARY_UNAVAILABLE_STATUSES = {500, 502, 503, 504}
+    SYSTEM_PROMPT = (
+        "You are a reliable RAG assistant. "
+        "Stay grounded in the supplied context. "
+        "Be concise, useful, and technical."
+    )
 
-    def __init__(self):
-        self.provider = settings.llm_provider
-        self.model = settings.llm_model
-        self.api_key = settings.llm_api_key
-        self.timeout = settings.request_timeout
-        self.api_base_url = settings.llm_api_base_url.rstrip("/")
+    def __init__(
+        self,
+        *,
+        api_base_url: str | None = None,
+        model: str | None = None,
+        api_token: str | None = None,
+        timeout: float | None = None,
+        retries: int | None = None,
+        retry_backoff_sec: float | None = None,
+        default_temperature: float | None = None,
+        client: httpx.AsyncClient | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        if client is not None and transport is not None:
+            raise ValueError("Pass either client or transport, not both.")
+
+        self.model = model if model is not None else settings.generation_model
+        configured_token = settings.model_api_token if api_token is None else api_token
+        self.api_token = configured_token.strip() if configured_token else None
+        self.timeout = timeout if timeout is not None else settings.model_request_timeout
+        self.retries = retries if retries is not None else settings.model_retries
+        self.retry_backoff_sec = (
+            retry_backoff_sec if retry_backoff_sec is not None else settings.model_retry_backoff_sec
+        )
+        self.default_temperature = (
+            default_temperature if default_temperature is not None else settings.model_temperature
+        )
+        configured_base_url = (
+            api_base_url if api_base_url is not None else settings.model_api_base_url
+        )
+        self.api_base_url = configured_base_url.rstrip("/")
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(timeout=self.timeout, transport=transport)
 
     def is_configured(self) -> bool:
-        return bool(self.api_key and self.provider == "gemini")
+        return bool(self.api_base_url and self.model)
 
-    @staticmethod
-    def _extract_text_from_gemini_payload(payload: dict) -> str:
-        texts: list[str] = []
-        for candidate in payload.get("candidates", []):
-            content = candidate.get("content", {})
-            for part in content.get("parts", []):
-                text = part.get("text")
-                if text:
-                    texts.append(text)
-        return "".join(texts).strip()
+    @property
+    def endpoint(self) -> str:
+        return f"{self.api_base_url}/chat/completions"
 
-    @staticmethod
-    def _extract_delta(previous_text: str, current_text: str) -> str:
-        if not current_text:
-            return ""
+    def _headers(self, *, streaming: bool = False) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if streaming:
+            headers["Accept"] = "text/event-stream"
+        if self.api_token:
+            headers["Authorization"] = f"Bearer {self.api_token}"
+        return headers
 
-        if current_text.startswith(previous_text):
-            return current_text[len(previous_text) :]
-
-        if previous_text.startswith(current_text):
-            return ""
-
-        common_len = 0
-        for prev_char, curr_char in zip(previous_text, current_text):
-            if prev_char != curr_char:
-                break
-            common_len += 1
-
-        delta = current_text[common_len:]
-        return delta if delta else current_text
-
-    def _build_body(self, prompt: str, max_new_tokens: int, temperature: float) -> dict:
+    def _build_body(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        *,
+        stream: bool,
+    ) -> dict:
         return {
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": (
-                            "You are a reliable RAG assistant. "
-                            "Stay grounded in the supplied context. "
-                            "Be concise, useful, and technical."
-                        )
-                    }
-                ]
-            },
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_new_tokens,
-            },
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_new_tokens,
+            "stream": stream,
         }
-
-    def _build_url(self, method: str) -> str:
-        return f"{self.api_base_url}/models/{self.model}:{method}?key={self.api_key}"
 
     @classmethod
     def _raise_for_llm_status(cls, response: httpx.Response) -> None:
@@ -110,6 +119,32 @@ class LLMService:
 
         response.raise_for_status()
 
+    async def _backoff(self, attempt: int) -> None:
+        delay = self.retry_backoff_sec * (attempt + 1)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    @staticmethod
+    def _extract_message_content(payload: dict) -> str:
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                "Model response does not contain choices[0].message.content."
+            ) from exc
+
+        if not isinstance(content, str):
+            raise RuntimeError("Model response content must be a string.")
+        return content
+
+    @staticmethod
+    def _extract_stream_delta(payload: dict) -> str:
+        try:
+            content = payload["choices"][0]["delta"].get("content")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            return ""
+        return content if isinstance(content, str) else ""
+
     async def generate(
         self,
         *,
@@ -120,50 +155,34 @@ class LLMService:
         if not self.is_configured():
             raise RuntimeError("LLM is not configured.")
 
-        temperature = settings.llm_temperature if temperature is None else temperature
-        url = self._build_url("generateContent")
-        body = self._build_body(prompt, max_new_tokens, temperature)
+        effective_temperature = self.default_temperature if temperature is None else temperature
+        body = self._build_body(
+            prompt,
+            max_new_tokens,
+            effective_temperature,
+            stream=False,
+        )
 
-        last_error: Exception | None = None
-        last_status_code: int | None = None
-
-        for attempt in range(settings.llm_retries + 1):
+        for attempt in range(self.retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(url, json=body)
-
-                last_status_code = response.status_code
-
-                if (
-                    response.status_code in self.RETRYABLE_STATUSES
-                    and attempt < settings.llm_retries
-                ):
-                    await asyncio.sleep(settings.llm_retry_backoff_sec * (attempt + 1))
+                response = await self._client.post(
+                    self.endpoint,
+                    json=body,
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt < self.retries:
+                    await self._backoff(attempt)
                     continue
+                raise LLMTemporaryUnavailableError() from exc
 
-                self._raise_for_llm_status(response)
-                payload = response.json()
-                return self._extract_text_from_gemini_payload(payload)
+            if response.status_code in self.RETRYABLE_STATUSES and attempt < self.retries:
+                await self._backoff(attempt)
+                continue
 
-            except (LLMRateLimitError, LLMTemporaryUnavailableError):
-                raise
-
-            except (httpx.HTTPError, httpx.TimeoutException) as exc:
-                last_error = exc
-                if attempt >= settings.llm_retries:
-                    break
-                await asyncio.sleep(settings.llm_retry_backoff_sec * (attempt + 1))
-
-        if last_status_code == 429:
-            raise LLMRateLimitError()
-
-        if last_status_code in self.TEMPORARY_UNAVAILABLE_STATUSES:
-            raise LLMTemporaryUnavailableError()
-
-        if last_error:
-            raise RuntimeError(f"LLM request failed: {last_error}") from last_error
-
-        return ""
+            self._raise_for_llm_status(response)
+            return self._extract_message_content(response.json())
 
     async def stream_generate(
         self,
@@ -175,31 +194,72 @@ class LLMService:
         if not self.is_configured():
             raise RuntimeError("LLM is not configured.")
 
-        temperature = settings.llm_temperature if temperature is None else temperature
-        url = self._build_url("streamGenerateContent") + "&alt=sse"
-        body = self._build_body(prompt, max_new_tokens, temperature)
+        effective_temperature = self.default_temperature if temperature is None else temperature
+        body = self._build_body(
+            prompt,
+            max_new_tokens,
+            effective_temperature,
+            stream=True,
+        )
 
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", url, json=body) as response:
-                self._raise_for_llm_status(response)
+        for attempt in range(self.retries + 1):
+            emitted = False
+            should_retry_status = False
 
-                emitted_text = ""
+            try:
+                async with self._client.stream(
+                    "POST",
+                    self.endpoint,
+                    json=body,
+                    headers=self._headers(streaming=True),
+                    timeout=self.timeout,
+                ) as response:
+                    if response.status_code in self.RETRYABLE_STATUSES and attempt < self.retries:
+                        should_retry_status = True
+                    else:
+                        self._raise_for_llm_status(response)
 
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
+                        async for line in response.aiter_lines():
+                            if not line or not line.startswith("data:"):
+                                continue
 
-                    raw = line[len("data:") :].strip()
-                    if not raw or raw == "[DONE]":
-                        continue
+                            raw = line[len("data:") :].strip()
+                            if not raw:
+                                continue
+                            if raw == "[DONE]":
+                                return
 
-                    try:
-                        payload = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
 
-                    current_text = self._extract_text_from_gemini_payload(payload)
-                    delta = self._extract_delta(emitted_text, current_text)
-                    if delta:
-                        emitted_text += delta
-                        yield delta
+                            delta = self._extract_stream_delta(payload)
+                            if delta:
+                                emitted = True
+                                yield delta
+
+                        return
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if emitted or attempt >= self.retries:
+                    raise LLMTemporaryUnavailableError() from exc
+                await self._backoff(attempt)
+                continue
+
+            if should_retry_status:
+                await self._backoff(attempt)
+                continue
+
+    async def aclose(self) -> None:
+        if self._owns_client and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> OpenAICompatibleLLMService:
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        await self.aclose()
+
+
+# Temporary compatibility alias used by RAGService, SQLService, and existing imports.
+LLMService = OpenAICompatibleLLMService
