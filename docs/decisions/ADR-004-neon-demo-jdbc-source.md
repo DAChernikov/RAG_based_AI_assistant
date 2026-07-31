@@ -1,6 +1,6 @@
 # ADR-004: Neon PostgreSQL as the first demonstration JDBC source
 
-- Status: Accepted for future implementation
+- Status: Accepted; connector compatibility implemented in Iteration 6
 - Date: 2026-07-30
 
 ## Context
@@ -12,9 +12,9 @@ create an unacceptable supply-chain and access surface.
 ## Decision
 
 Use Neon PostgreSQL as the first demonstration JDBC metadata source. Provision a dedicated
-`rag_demo_source` schema and a dedicated read-only user. Connect over SSL using a pinned
-PostgreSQL JDBC driver from the managed driver allowlist. Store credentials by reference and
-restrict discovery to the allowed schema.
+`rag_demo_source` schema and a dedicated read-only user. Connect over verified TLS using a
+versioned PostgreSQL metadata adapter from the managed registry. Store credentials by reference
+and restrict discovery to the allowed schema.
 
 The isolated connector performs metadata-only operations for tables, views, columns, types,
 comments, primary/foreign keys, indexes, and relationships. Every driver version has a
@@ -24,9 +24,11 @@ checksum. The UI and API never accept arbitrary JDBC JAR uploads.
 
 - The demonstration has a narrow, auditable access boundary.
 - Driver lifecycle and checksums become managed product configuration.
-- Metadata completeness and Neon-specific behavior require connector integration tests.
+- Metadata completeness is covered against local PostgreSQL; a deployment smoke test against
+  an owner-provisioned Neon demo remains pending.
 - A read-only role, SSL, allowlists, timeouts, and network policy are mandatory before first
   connection.
 
-Iteration 1 does not connect to Neon, create schemas or users, inspect metadata, or modify any
+Iteration 6 implements the managed PostgreSQL metadata adapter and safe Neon-compatible config.
+It does not connect to Neon, create schemas or users, inspect remote metadata, or modify any
 remote database state.

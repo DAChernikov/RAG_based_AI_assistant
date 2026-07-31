@@ -133,6 +133,14 @@ Arbitrary JDBC JAR upload is forbidden. Every allowed driver has a managed versi
 checksum. Network policy, read-only database roles, query timeouts, and metadata-only
 operations limit connector impact.
 
+Iteration 6 implements the PostgreSQL/Neon-compatible adapter inside the dedicated ingestion
+worker. The versioned registry currently contains only `postgresql` version `1`, mapped to the
+preinstalled psycopg adapter; it does not accept JAR paths, module names or source-defined
+connection properties. The connector resolves credentials by reference, checks the public host
+and explicit host/database/catalog/schema allowlists, requires `sslmode=verify-full`, establishes
+a read-only transaction, and executes fixed `pg_catalog` metadata queries only. Other database
+vendors and a separately deployed JVM connector remain future extensions.
+
 ## Immutable source version lifecycle
 
 Each source refresh will:
@@ -149,8 +157,9 @@ Each source refresh will:
 Queries pin or resolve an active knowledge-base version so results remain explainable during
 concurrent ingestion. Failed staging versions never become visible.
 
-Iteration 5 stores normalized documents and chunks through tenant-scoped content-addressed
-blobs, so immutable version rows can reuse unchanged content. PostgreSQL remains authoritative;
+Iteration 6 stores Website, Git and PostgreSQL metadata documents and chunks through
+tenant-scoped content-addressed blobs, so immutable version rows can reuse unchanged content.
+PostgreSQL remains authoritative;
 a separate Redis Stream delivers refresh jobs to a dedicated ingestion worker. Durable job
 leases, heartbeats, pending reclaim, bounded retry, cancellation and a DLQ protect repeated
 delivery. Embedding/index staging and scheduled refresh are not implemented yet.
@@ -217,8 +226,9 @@ Neon PostgreSQL is planned as the first demonstration JDBC metadata source. It w
 - an allowlist limiting scans to the demonstration schema;
 - metadata-only access.
 
-No Neon connection, schema change, user creation, or metadata scan is part of the current
-iteration.
+Iteration 6 provides a Neon-compatible PostgreSQL source configuration and environment-backed
+credential resolution. It does not provision the demo schema/user and did not connect to or
+change a remote Neon database. Those operations remain owner-managed deployment setup.
 
 ## Security, tenancy, and operations
 

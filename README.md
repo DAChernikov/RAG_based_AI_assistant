@@ -12,12 +12,12 @@ self-hosted OpenAI-compatible HTTP API. Коммерческие внешние 
 
 Локальная аутентификация, tenant isolation, роли `admin`/`user`, API keys и audit log
 реализованы в Iteration 3. Website/Git connectors и отдельный incremental ingestion worker
-реализованы в Iteration 5. Web UI, JDBC connector, pgvector и multi-label retrieval пока не
-реализованы.
+реализованы в Iteration 5. Управляемый PostgreSQL JDBC metadata connector добавлен в Iteration
+6. Web UI, scheduler, pgvector и multi-label retrieval пока не реализованы.
 
 Каталог поддерживает typed Website/Git/JDBC configs и immutable source versions с atomic
-activation/rollback. Website crawl и Git fetch/parse работают по on-demand refresh; JDBC,
-embeddings, retrieval integration и scheduler пока не реализованы.
+activation/rollback. Website crawl, Git fetch/parse и PostgreSQL metadata introspection работают
+по on-demand refresh; embeddings, retrieval integration и scheduler пока не реализованы.
 
 ## Реализованная runtime-схема
 
@@ -30,10 +30,13 @@ Telegram / HTTP client
           +------ Redis Streams jobs ------+
                     /              \
                    v                v
-          inference worker    ingestion worker
-             |       |          |          |
-             v       v          v          v
-       retriever  model API  Website Git  PostgreSQL content
+          inference worker       ingestion worker
+             |       |          /       |        \
+             v       v         v        v         v
+       retriever  model API  Website    Git    JDBC metadata
+                                               |
+                                               v
+                                  PostgreSQL content/version state
 ```
 
 Redis хранит delivery/events/heartbeat, но не является единственным хранилищем результата.
@@ -124,7 +127,8 @@ Admin knowledge catalog:
 
 `POST /v1/admin/knowledge-sources/{id}/refresh` требует `Idempotency-Key` и создаёт durable
 ingestion run. Website connector соблюдает allowlist/limits и SSRF policy; Git connector делает
-изолированный fetch и фиксирует resolved commit SHA. JDBC refresh пока не реализован.
+изолированный fetch и фиксирует resolved commit SHA. JDBC refresh использует только managed
+`postgresql` driver registry entry, read-only system-catalog queries и строгие allowlists.
 
 `/health` and sanitized `/ready` remain public. `/admin/runtime` is admin-only. Jobs,
 conversations and SSE streams are filtered by authenticated tenant and user. Telegram and
@@ -148,8 +152,8 @@ data: <versioned JSON contract>
 
 ## Application state и migrations
 
-PostgreSQL является локальным application database. Neon зарезервирован для будущего JDBC
-metadata demo и в Iteration 2 не используется.
+PostgreSQL является локальным application database. Neon может быть отдельным JDBC metadata demo
+source и не должен использоваться как скрытая замена application database.
 
 ```bash
 make migrate
@@ -174,6 +178,29 @@ active version per source.
 Normalized documents and chunks reference tenant-scoped content-addressed blobs. Unchanged
 content is reused between immutable versions. Run/version failures are sanitized together;
 failed and staging versions are not used by retrieval.
+
+## PostgreSQL/Neon metadata source
+
+Iteration 6 принимает PostgreSQL JDBC endpoint, но соединение выполняет предустановленный
+версионированный psycopg adapter. Загрузка JAR, Python module path и произвольных connection
+properties запрещена. Connector:
+
+- требует точные `host_allowlist`, `database_allowlist`, `catalog_allowlist` и
+  `schema_allowlist`;
+- требует `sslmode=verify-full`, проверяет публичный DNS и повторно не использует application
+  database credentials;
+- задаёт read-only transaction, connect/statement timeout и выполняет только фиксированные
+  metadata queries к `pg_catalog`;
+- сохраняет tables/views, columns/types/defaults/comments, PK/FK/unique constraints и indexes
+  как deterministic documents/chunks существующей immutable version.
+
+Для Neon владелец отдельно создаёт schema `rag_demo_source` и metadata-only/read-only role,
+после чего размещает username/password только в deployment environment или secret facility под
+именем `RAG_CREDENTIAL_<FIRST_16_SHA256_HEX>` для opaque reference
+`connection:neon-demo`. В source config сохраняются endpoint без user info, reference и
+allowlists. Полная безопасная форма config описана в
+[`docs/api/knowledge-catalog.md`](docs/api/knowledge-catalog.md). Репозиторий не создаёт Neon
+schema/user и в Iteration 6 не подключался к удалённой Neon database.
 
 ## MacBook Air 24 GB profile
 
@@ -253,6 +280,7 @@ models и training opt-in; `RUN_TRAINING = False` по умолчанию. Ре�
 | `API_KEY_DEFAULT_TTL_SEC` | default lifetime API key |
 | `API_KEY` | Telegram credential для заголовка `X-API-Key` |
 | `LOGIN_RATE_LIMIT_PREFIX` | Redis key namespace for shared login throttling |
+| `RAG_CREDENTIAL_<REF_HASH>` | deployment-only connector credential JSON; never commit it |
 
 Остальные defaults и safe placeholders находятся в `.env.example`. Secrets не должны
 попадать в Git, docs, logs или Redis contracts.

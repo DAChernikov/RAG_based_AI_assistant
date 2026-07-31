@@ -72,20 +72,35 @@ Status: implemented on `feature/product-v1`.
 - admin refresh, status, event and cancellation API with tenant isolation and audit events;
 - immutable staging, validation, optional atomic activation and sanitized failures.
 
-JDBC connectivity, scheduler, embeddings, pgvector, retrieval integration and Web UI remain
-out of scope.
+Scheduler, embeddings, pgvector, retrieval integration and Web UI remain out of scope.
+
+## Iteration 6 — JDBC metadata connector and ingestion hardening
+
+Status: implemented on `feature/product-v1`.
+
+- complete-discovery fencing prevents truncated Website crawls from producing deletions;
+- tree-based HTML extraction preserves nested text, lists, code and table structure;
+- connector credentials are channel-scoped and Git runs without ambient HOME/config state;
+- terminal ingestion reclaim atomically fails exhausted runs and lease tokens fence mutations;
+- a versioned managed driver registry exposes the preinstalled PostgreSQL metadata adapter;
+- JDBC targets require host/database/catalog/schema allowlists, verified TLS and fixed timeouts;
+- tables, views, columns, types, defaults, comments, PK/FK/unique constraints and indexes are
+  normalized into deterministic incremental documents and chunks;
+- Neon-compatible source configuration uses an environment-backed connection reference; no
+  remote Neon database was contacted or changed.
+
+Scheduler, embeddings, pgvector, retrieval integration and Web UI remain out of scope.
 
 ## Later planned stages
 
-1. Isolated allowlisted JDBC metadata connector, followed by the Neon demo source.
-2. BGE-M3 embedding service, pgvector, hybrid retrieval, and index activation/rollback.
-3. Multi-label `RoutePlan`, parallel retrieval branches, merge/rerank, and hybrid answers.
-4. SQL AST/schema validation, safe `EXPLAIN`, bounded repair, and only then evaluation of a
+1. BGE-M3 embedding service, pgvector, hybrid retrieval, and index activation/rollback.
+2. Multi-label `RoutePlan`, parallel retrieval branches, merge/rerank, and hybrid answers.
+3. SQL AST/schema validation, safe `EXPLAIN`, bounded repair, and only then evaluation of a
    dedicated SQL expert model.
-5. React/TypeScript Web UI for chat, history, sources, SQL results, and administration.
-6. Model/prompt registry, S3 model artifact cache workflow, evaluation framework, and mature
+4. React/TypeScript Web UI for chat, history, sources, SQL results, and administration.
+5. Model/prompt registry, S3 model artifact cache workflow, evaluation framework, and mature
    observability.
-7. Production deployment profiles and optional larger generator hardware.
+6. Production deployment profiles and optional larger generator hardware.
 
 Stage ordering may change after measurements, but no stage should claim a future capability
 before its implementation and verification.

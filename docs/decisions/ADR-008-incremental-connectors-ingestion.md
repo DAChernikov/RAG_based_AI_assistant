@@ -10,8 +10,8 @@ can be repeated, while PostgreSQL must remain the source of truth.
 
 ## Decision
 
-- Website and Git are adapters behind the shared connector contract; JDBC remains a future
-  isolated adapter.
+- Website and Git are adapters behind the shared connector contract. Iteration 6 adds the
+  allowlisted PostgreSQL metadata adapter to the same ingestion boundary.
 - Credentials are resolved only from opaque references through `CredentialResolver` and never
   stored in catalog configuration or job events.
 - Each refresh atomically creates a PostgreSQL ingestion run and discovered source version,
@@ -26,11 +26,12 @@ can be repeated, while PostgreSQL must remain the source of truth.
   link-local and metadata addresses denied by default.
 - Git uses an isolated temporary checkout, exact commit resolution, disabled submodules/LFS,
   tracked-file traversal and conservative binary/secret/vendor exclusions.
+- Truncated Website discovery never produces deletions, and every version/document mutation
+  from a worker is fenced by the current database lease token.
 
 ## Consequences
 
 The API remains responsive and ingestion scales independently from model inference. Delivery is
 at-least-once but processing is idempotent around the database lease. Content blobs require a
 future garbage-collection policy after version-retention rules are defined. JavaScript-rendered
-sites, repository groups, scheduler, embeddings, retrieval integration and JDBC access remain
-future work.
+sites, repository groups, scheduler, embeddings and retrieval integration remain future work.
