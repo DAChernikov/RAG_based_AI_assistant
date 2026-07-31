@@ -40,6 +40,9 @@ def test_catalog_migration_upgrade_downgrade_upgrade():
             "source_versions",
             "source_objects",
             "ingestion_runs",
+            "content_blobs",
+            "normalized_documents",
+            "document_chunks",
         }.issubset(inspect(engine).get_table_names())
         engine.dispose()
 

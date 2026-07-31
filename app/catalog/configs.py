@@ -78,6 +78,12 @@ class WebsiteSourceConfig(SourceConfigBase):
     exclude_patterns: list[str] = Field(default_factory=list, max_length=100)
     max_pages: int = Field(default=1000, ge=1, le=100_000)
     max_depth: int = Field(default=10, ge=0, le=100)
+    max_page_bytes: int = Field(default=5_000_000, ge=1024, le=100_000_000)
+    max_crawl_seconds: float = Field(default=900.0, gt=0, le=86_400)
+    request_timeout_sec: float = Field(default=20.0, gt=0, le=300)
+    requests_per_second: float = Field(default=2.0, gt=0, le=100)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    use_sitemap: bool = True
 
     @field_validator("allowed_domains")
     @classmethod
@@ -115,6 +121,11 @@ class GitSourceConfig(SourceConfigBase):
     is_group: bool = False
     include_patterns: list[str] = Field(default_factory=list, max_length=200)
     exclude_patterns: list[str] = Field(default_factory=list, max_length=200)
+    max_files: int = Field(default=50_000, ge=1, le=1_000_000)
+    max_file_bytes: int = Field(default=5_000_000, ge=1, le=100_000_000)
+    max_total_bytes: int = Field(default=2_000_000_000, ge=1, le=20_000_000_000)
+    include_submodules: bool = False
+    enable_lfs: bool = False
 
     @field_validator("repository_url")
     @classmethod
@@ -123,7 +134,7 @@ class GitSourceConfig(SourceConfigBase):
         if re.fullmatch(r"git@[A-Za-z0-9.-]+:[A-Za-z0-9_./-]+", raw):
             return raw
         parsed = urlsplit(raw)
-        if parsed.scheme not in {"http", "https", "ssh"} or not parsed.hostname:
+        if parsed.scheme not in {"https", "ssh"} or not parsed.hostname:
             raise ValueError("repository_url must use HTTPS, ssh:// or git@host:path syntax.")
         if parsed.password is not None or (
             parsed.scheme in {"http", "https"} and parsed.username is not None

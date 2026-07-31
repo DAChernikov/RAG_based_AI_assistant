@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
 
     runtime = {
         "execution_mode": mode,
+        "settings": settings,
         "artifacts_ready": False,
         "rag_ready": False,
         "llm_name": settings.generation_model,
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
         "auth_redis": None,
         "catalog_repository": None,
         "catalog_service": None,
+        "ingestion_queue": None,
         "startup_error": None,
     }
 
@@ -63,6 +65,15 @@ async def lifespan(app: FastAPI):
         runtime["auth_repository"] = auth_repository
         runtime["catalog_repository"] = catalog_repository
         runtime["catalog_service"] = CatalogService(catalog_repository)
+        try:
+            from app.ingestion.redis_queue import RedisIngestionQueue
+
+            ingestion_queue = RedisIngestionQueue()
+            await ingestion_queue.ensure_group()
+            runtime["ingestion_queue"] = ingestion_queue
+        except Exception:
+            if "ingestion_queue" in locals():
+                await ingestion_queue.close()
         if not settings.auth_disabled:
             from redis.asyncio import Redis
 
@@ -120,6 +131,9 @@ async def lifespan(app: FastAPI):
         queue = runtime.get("queue")
         if queue is not None:
             await queue.close()
+        ingestion_queue = runtime.get("ingestion_queue")
+        if ingestion_queue is not None:
+            await ingestion_queue.close()
         auth_redis = runtime.get("auth_redis")
         if auth_redis is not None:
             await auth_redis.aclose()

@@ -95,6 +95,26 @@ services:
     mem_limit: 6g
     restart: unless-stopped
 
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: infra/ingestion-worker.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:-rag-dev-only}@postgres:5432/${POSTGRES_APP_DB:-rag}
+      REDIS_URL: redis://redis:6379/0
+      INGESTION_WORKER_ID: ${INGESTION_WORKER_ID:-ingestion-worker-1}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    stop_grace_period: 2m
+    mem_limit: 512m
+    restart: unless-stopped
+
   bot:
     build:
       context: .

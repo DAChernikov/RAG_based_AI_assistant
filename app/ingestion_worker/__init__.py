@@ -1,0 +1,1 @@
+"""Separate ingestion worker process."""

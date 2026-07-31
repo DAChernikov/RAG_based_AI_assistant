@@ -15,6 +15,9 @@ run-bot:
 run-worker:
 	poetry run python -m app.worker.main
 
+run-ingestion-worker:
+	poetry run python -m app.ingestion_worker.main
+
 migrate:
 	poetry run alembic upgrade head
 

@@ -72,7 +72,24 @@ class IngestionRunResponse(BaseModel):
     source_version_id: uuid.UUID
     status: str
     connector_version: str
-    started_at: datetime
+    started_at: datetime | None
     completed_at: datetime | None
     error_code: str | None
     error_message: str | None
+    attempt_count: int = 0
+    max_attempts: int = 0
+    cancel_requested: bool = False
+    auto_activate: bool = True
+
+
+class SourceRefreshRequest(BaseModel):
+    auto_activate: bool = True
+
+
+class IngestionEventResponse(BaseModel):
+    id: str
+    run_id: uuid.UUID
+    event_type: str
+    stage: str | None = None
+    message: str | None = None
+    timestamp: datetime

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.connectors.base import ConnectorDocument, DiscoveryResult, PreviousObject
 from app.state.models import (
+    ContentBlob,
+    DocumentChunk,
     IngestionRun,
+    IngestionRunStatus,
     KnowledgeBase,
     KnowledgeBaseSource,
     KnowledgeSource,
+    NormalizedDocument,
     SourceObject,
     SourceVersion,
     SourceVersionStatus,
@@ -30,6 +36,10 @@ class ImmutableVersionError(RuntimeError):
 
 
 class SourceHistoryExistsError(RuntimeError):
+    pass
+
+
+class IdempotencyConflictError(RuntimeError):
     pass
 
 
@@ -469,6 +479,465 @@ class CatalogRepository:
                 )
             )
 
+    def get_ingestion_run(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> IngestionRun | None:
+        with self.session_factory() as session:
+            return session.scalar(
+                select(IngestionRun).where(
+                    IngestionRun.id == run_id,
+                    IngestionRun.tenant_id == tenant_id,
+                )
+            )
+
+    def create_refresh_job(
+        self,
+        tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        correlation_id: uuid.UUID,
+        auto_activate: bool,
+        max_attempts: int,
+    ) -> tuple[IngestionRun, SourceVersion, bool]:
+        try:
+            with self.session_factory.begin() as session:
+                source = session.scalar(
+                    select(KnowledgeSource)
+                    .where(
+                        KnowledgeSource.id == source_id,
+                        KnowledgeSource.tenant_id == tenant_id,
+                    )
+                    .with_for_update()
+                )
+                if source is None:
+                    raise CatalogNotFoundError("Knowledge source was not found.")
+                if not source.is_enabled:
+                    raise InvalidVersionTransitionError("Disabled source cannot be refreshed.")
+                existing = session.scalar(
+                    select(IngestionRun).where(
+                        IngestionRun.tenant_id == tenant_id,
+                        IngestionRun.operation == "refresh_source",
+                        IngestionRun.idempotency_key == idempotency_key,
+                    )
+                )
+                if existing is not None:
+                    if existing.request_hash != request_hash or existing.source_id != source_id:
+                        raise IdempotencyConflictError(
+                            "Idempotency-Key was already used for a different request."
+                        )
+                    version = session.get(SourceVersion, existing.source_version_id)
+                    return existing, version, False
+                latest = session.scalar(
+                    select(func.max(SourceVersion.version_number)).where(
+                        SourceVersion.source_id == source_id
+                    )
+                )
+                version = SourceVersion(
+                    tenant_id=tenant_id,
+                    source_id=source_id,
+                    version_number=(latest or 0) + 1,
+                    status=SourceVersionStatus.DISCOVERED.value,
+                    config_snapshot=dict(source.config),
+                )
+                session.add(version)
+                session.flush()
+                connector_version = f"{source.source_type}/1.0"
+                run = IngestionRun(
+                    tenant_id=tenant_id,
+                    source_id=source_id,
+                    source_version_id=version.id,
+                    status=IngestionRunStatus.QUEUED.value,
+                    connector_version=connector_version,
+                    operation="refresh_source",
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    correlation_id=correlation_id,
+                    auto_activate=auto_activate,
+                    max_attempts=max_attempts,
+                )
+                session.add(run)
+                session.flush()
+                return run, version, True
+        except IntegrityError:
+            with self.session_factory() as session:
+                existing = session.scalar(
+                    select(IngestionRun).where(
+                        IngestionRun.tenant_id == tenant_id,
+                        IngestionRun.operation == "refresh_source",
+                        IngestionRun.idempotency_key == idempotency_key,
+                    )
+                )
+                if existing is None:
+                    raise
+                if existing.request_hash != request_hash or existing.source_id != source_id:
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was already used for a different request."
+                    )
+                return existing, session.get(SourceVersion, existing.source_version_id), False
+
+    def claim_ingestion_run(
+        self, run_id: uuid.UUID, worker_id: str, lease_seconds: int
+    ) -> tuple[IngestionRun, uuid.UUID] | None:
+        now = datetime.now(UTC)
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
+            )
+            if run is None or run.status in {
+                IngestionRunStatus.COMPLETED.value,
+                IngestionRunStatus.FAILED.value,
+                IngestionRunStatus.CANCELLED.value,
+            }:
+                return None
+            if (
+                run.status == IngestionRunStatus.RUNNING.value
+                and run.lease_expires_at is not None
+                and (
+                    run.lease_expires_at.replace(tzinfo=UTC)
+                    if run.lease_expires_at.tzinfo is None
+                    else run.lease_expires_at
+                )
+                > now
+            ):
+                return None
+            if run.attempt_count >= run.max_attempts:
+                return None
+            lease_token = uuid.uuid4()
+            run.status = IngestionRunStatus.RUNNING.value
+            run.attempt_count += 1
+            run.started_at = run.started_at or now
+            run.lease_owner = worker_id
+            run.lease_token = lease_token
+            run.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            return run, lease_token
+
+    def renew_ingestion_lease(
+        self, run_id: uuid.UUID, lease_token: uuid.UUID, lease_seconds: int
+    ) -> bool:
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
+            )
+            if (
+                run is None
+                or run.status != IngestionRunStatus.RUNNING.value
+                or run.lease_token != lease_token
+            ):
+                return False
+            run.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
+            return True
+
+    def retry_ingestion_job(
+        self, run_id: uuid.UUID, lease_token: uuid.UUID, error_code: str
+    ) -> bool:
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
+            )
+            if (
+                run is None
+                or run.status != IngestionRunStatus.RUNNING.value
+                or run.lease_token != lease_token
+                or run.attempt_count >= run.max_attempts
+            ):
+                return False
+            run.status = IngestionRunStatus.QUEUED.value
+            run.error_code = error_code[:100]
+            run.error_message = "Temporary ingestion failure; retry scheduled."
+            run.lease_owner = None
+            run.lease_token = None
+            run.lease_expires_at = None
+            return True
+
+    def request_ingestion_cancel(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> bool:
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun)
+                .where(IngestionRun.id == run_id, IngestionRun.tenant_id == tenant_id)
+                .with_for_update()
+            )
+            if run is None:
+                raise CatalogNotFoundError("Ingestion run was not found.")
+            if run.status in {
+                IngestionRunStatus.COMPLETED.value,
+                IngestionRunStatus.FAILED.value,
+                IngestionRunStatus.CANCELLED.value,
+            }:
+                return False
+            run.cancel_requested = True
+            if run.status == IngestionRunStatus.QUEUED.value:
+                run.status = IngestionRunStatus.CANCELLED.value
+                run.completed_at = datetime.now(UTC)
+                version = session.get(SourceVersion, run.source_version_id)
+                if version is not None:
+                    version.status = SourceVersionStatus.FAILED.value
+                    version.failed_at = datetime.now(UTC)
+                    version.failure_code = "ingestion_cancelled"
+                    version.failure_message = "Ingestion was cancelled."
+            return True
+
+    def ingestion_cancel_requested(self, run_id: uuid.UUID) -> bool:
+        with self.session_factory() as session:
+            return bool(
+                session.scalar(
+                    select(IngestionRun.cancel_requested).where(IngestionRun.id == run_id)
+                )
+            )
+
+    def complete_ingestion_job(self, run_id: uuid.UUID, lease_token: uuid.UUID) -> bool:
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
+            )
+            if (
+                run is None
+                or run.status != IngestionRunStatus.RUNNING.value
+                or run.lease_token != lease_token
+            ):
+                return False
+            run.status = IngestionRunStatus.COMPLETED.value
+            run.completed_at = datetime.now(UTC)
+            run.lease_owner = None
+            run.lease_token = None
+            run.lease_expires_at = None
+            return True
+
+    def cancel_ingestion_job(self, run_id: uuid.UUID, lease_token: uuid.UUID) -> bool:
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
+            )
+            if (
+                run is None
+                or run.status != IngestionRunStatus.RUNNING.value
+                or run.lease_token != lease_token
+            ):
+                return False
+            run.status = IngestionRunStatus.CANCELLED.value
+            run.completed_at = datetime.now(UTC)
+            run.lease_owner = None
+            run.lease_token = None
+            run.lease_expires_at = None
+            version = session.get(SourceVersion, run.source_version_id)
+            if version is not None and version.status not in {
+                SourceVersionStatus.ACTIVE.value,
+                SourceVersionStatus.SUPERSEDED.value,
+            }:
+                version.status = SourceVersionStatus.FAILED.value
+                version.failed_at = datetime.now(UTC)
+                version.failure_code = "ingestion_cancelled"
+                version.failure_message = "Ingestion was cancelled."
+            return True
+
+    def load_previous_objects(
+        self, tenant_id: uuid.UUID, source_id: uuid.UUID
+    ) -> tuple[dict[str, PreviousObject], str | None, uuid.UUID | None]:
+        with self.session_factory() as session:
+            version = session.scalar(
+                select(SourceVersion)
+                .where(
+                    SourceVersion.tenant_id == tenant_id,
+                    SourceVersion.source_id == source_id,
+                    SourceVersion.status.in_(
+                        [
+                            SourceVersionStatus.ACTIVE.value,
+                            SourceVersionStatus.READY.value,
+                            SourceVersionStatus.SUPERSEDED.value,
+                        ]
+                    ),
+                )
+                .order_by(
+                    (SourceVersion.status == SourceVersionStatus.ACTIVE.value).desc(),
+                    SourceVersion.version_number.desc(),
+                )
+            )
+            if version is None:
+                return {}, None, None
+            rows = session.scalars(
+                select(SourceObject).where(SourceObject.source_version_id == version.id)
+            )
+            objects = {
+                item.object_key: PreviousObject(
+                    object_key=item.object_key,
+                    checksum=item.checksum,
+                    metadata={
+                        **dict(item.metadata_json),
+                        "_byte_count": item.byte_count,
+                        "_chunk_count": item.chunk_count,
+                    },
+                )
+                for item in rows
+            }
+            revision = (version.manifest or {}).get("source_revision")
+            return objects, revision, version.id
+
+    @staticmethod
+    def _content_blob(session: Session, tenant_id: uuid.UUID, content: str) -> ContentBlob:
+        checksum = __import__("hashlib").sha256(content.encode("utf-8")).hexdigest()
+        blob = session.scalar(
+            select(ContentBlob).where(
+                ContentBlob.tenant_id == tenant_id,
+                ContentBlob.checksum == checksum,
+            )
+        )
+        if blob is None:
+            blob = ContentBlob(
+                tenant_id=tenant_id,
+                checksum=checksum,
+                content=content,
+                byte_count=len(content.encode("utf-8")),
+            )
+            session.add(blob)
+            session.flush()
+        return blob
+
+    def persist_discovery(
+        self,
+        tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        version_id: uuid.UUID,
+        discovery: DiscoveryResult,
+        previous_version_id: uuid.UUID | None,
+        manifest: dict,
+        content_checksum: str,
+    ) -> None:
+        with self.session_factory.begin() as session:
+            version = session.scalar(
+                select(SourceVersion)
+                .where(
+                    SourceVersion.id == version_id,
+                    SourceVersion.source_id == source_id,
+                    SourceVersion.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            if version is None:
+                raise CatalogNotFoundError("Source version was not found.")
+            if version.status != SourceVersionStatus.INGESTING.value:
+                raise ImmutableVersionError("Version contents can change only while ingesting.")
+            document_ids = select(NormalizedDocument.id).where(
+                NormalizedDocument.source_version_id == version_id
+            )
+            session.execute(
+                delete(DocumentChunk).where(DocumentChunk.document_id.in_(document_ids))
+            )
+            session.execute(
+                delete(NormalizedDocument).where(NormalizedDocument.source_version_id == version_id)
+            )
+            session.execute(
+                delete(SourceObject).where(SourceObject.source_version_id == version_id)
+            )
+            previous_documents = {}
+            if previous_version_id is not None:
+                previous_documents = {
+                    item.object_key: item
+                    for item in session.scalars(
+                        select(NormalizedDocument).where(
+                            NormalizedDocument.source_version_id == previous_version_id
+                        )
+                    )
+                }
+            by_key = {document.object_key: document for document in discovery.documents}
+            for key in discovery.unchanged:
+                if key in by_key:
+                    continue
+                previous = previous_documents.get(key)
+                if previous is None:
+                    continue
+                source_object = session.scalar(
+                    select(SourceObject).where(
+                        SourceObject.source_version_id == previous_version_id,
+                        SourceObject.object_key == key,
+                    )
+                )
+                if source_object is None:
+                    continue
+                session.add(
+                    SourceObject(
+                        tenant_id=tenant_id,
+                        source_version_id=version_id,
+                        object_key=key,
+                        checksum=source_object.checksum,
+                        byte_count=source_object.byte_count,
+                        chunk_count=source_object.chunk_count,
+                        metadata_json=dict(source_object.metadata_json),
+                    )
+                )
+                clone = NormalizedDocument(
+                    tenant_id=tenant_id,
+                    source_version_id=version_id,
+                    object_key=key,
+                    canonical_uri=previous.canonical_uri,
+                    title=previous.title,
+                    checksum=previous.checksum,
+                    content_blob_id=previous.content_blob_id,
+                    metadata_json=dict(previous.metadata_json),
+                )
+                session.add(clone)
+                session.flush()
+                old_chunks = session.scalars(
+                    select(DocumentChunk).where(DocumentChunk.document_id == previous.id)
+                )
+                for chunk in old_chunks:
+                    session.add(
+                        DocumentChunk(
+                            tenant_id=tenant_id,
+                            document_id=clone.id,
+                            chunk_index=chunk.chunk_index,
+                            checksum=chunk.checksum,
+                            content_blob_id=chunk.content_blob_id,
+                            metadata_json=dict(chunk.metadata_json),
+                        )
+                    )
+            for document in discovery.documents:
+                self._persist_document(session, tenant_id, version_id, document)
+            version.manifest = manifest
+            version.content_checksum = content_checksum
+
+    def _persist_document(
+        self,
+        session: Session,
+        tenant_id: uuid.UUID,
+        version_id: uuid.UUID,
+        document: ConnectorDocument,
+    ) -> None:
+        session.add(
+            SourceObject(
+                tenant_id=tenant_id,
+                source_version_id=version_id,
+                object_key=document.object_key,
+                checksum=document.checksum,
+                byte_count=document.byte_count,
+                chunk_count=len(document.chunks),
+                metadata_json=dict(document.metadata),
+            )
+        )
+        blob = self._content_blob(session, tenant_id, document.text)
+        normalized = NormalizedDocument(
+            tenant_id=tenant_id,
+            source_version_id=version_id,
+            object_key=document.object_key,
+            canonical_uri=document.canonical_uri,
+            title=document.title,
+            checksum=document.checksum,
+            content_blob_id=blob.id,
+            metadata_json=dict(document.metadata),
+        )
+        session.add(normalized)
+        session.flush()
+        for chunk in document.chunks:
+            chunk_blob = self._content_blob(session, tenant_id, chunk.text)
+            session.add(
+                DocumentChunk(
+                    tenant_id=tenant_id,
+                    document_id=normalized.id,
+                    chunk_index=chunk.chunk_index,
+                    checksum=chunk.checksum,
+                    content_blob_id=chunk_blob.id,
+                    metadata_json=dict(chunk.metadata),
+                )
+            )
+
     def create_ingestion_run(
         self,
         tenant_id: uuid.UUID,
@@ -506,6 +975,7 @@ class CatalogRepository:
         run_id: uuid.UUID,
         error_code: str,
         error_message: str,
+        lease_token: uuid.UUID | None = None,
     ) -> None:
         with self.session_factory.begin() as session:
             version = session.scalar(
@@ -526,6 +996,8 @@ class CatalogRepository:
                 )
                 .with_for_update()
             )
+            if lease_token is not None and (run is None or run.lease_token != lease_token):
+                return
             if version is not None and version.status not in {
                 SourceVersionStatus.ACTIVE.value,
                 SourceVersionStatus.SUPERSEDED.value,
@@ -539,3 +1011,8 @@ class CatalogRepository:
                 run.completed_at = datetime.now(UTC)
                 run.error_code = error_code[:100]
                 run.error_message = error_message[:500]
+                run.lease_owner = None
+                run.lease_token = None
+                run.lease_expires_at = None
+
+    NormalizedDocument,

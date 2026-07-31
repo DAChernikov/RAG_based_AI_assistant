@@ -14,7 +14,7 @@ from app.auth.rate_limit import RedisLoginRateLimiter
 from app.auth.security import AuthenticationError
 from app.catalog.repository import CatalogRepository
 from app.catalog.service import CatalogService
-from app.state.models import KnowledgeSource, SourceVersion, Tenant
+from app.state.models import IngestionRun, KnowledgeSource, SourceVersion, Tenant
 
 pytestmark = pytest.mark.integration
 
@@ -50,6 +50,31 @@ def test_atomic_concurrent_activation_and_redis_rate_limit():
 
     repository = CatalogRepository(factory)
     service = CatalogService(repository)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        refreshes = list(
+            executor.map(
+                lambda _index: repository.create_refresh_job(
+                    tenant.id,
+                    source.id,
+                    idempotency_key=f"concurrent-{suffix}",
+                    request_hash="a" * 64,
+                    correlation_id=uuid.uuid4(),
+                    auto_activate=True,
+                    max_attempts=3,
+                ),
+                range(2),
+            )
+        )
+    assert refreshes[0][0].id == refreshes[1][0].id
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count(IngestionRun.id)).where(
+                    IngestionRun.idempotency_key == f"concurrent-{suffix}"
+                )
+            )
+            == 1
+        )
     objects = [
         {
             "object_key": "index",

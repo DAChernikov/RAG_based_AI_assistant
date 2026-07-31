@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -21,6 +22,30 @@ from app.state.models import AuditEvent, Base, Tenant, User
 class AsyncCallAdapter:
     async def _call(self, method, *args, **kwargs):
         return await asyncio.to_thread(method, *args, **kwargs)
+
+
+class FakeIngestionQueue:
+    def __init__(self):
+        self.jobs = []
+        self.events = []
+
+    async def enqueue(self, contract):
+        self.jobs.append(contract)
+
+    async def publish_event(self, event):
+        self.events.append(event)
+
+    async def list_events(self, run_id):
+        return [
+            {
+                "id": "1-0",
+                "run_id": str(run_id),
+                "event_type": "queued",
+                "stage": None,
+                "message": None,
+                "timestamp": "2026-07-31T00:00:00Z",
+            }
+        ]
 
 
 def _principal(tenant, user, role):
@@ -192,3 +217,81 @@ def test_catalog_api_activation_uses_application_created_versions():
     assert activated.json()["status"] == "active"
     with factory() as session:
         assert "source_version.activate" in set(session.scalars(select(AuditEvent.action)))
+
+
+def test_refresh_api_rbac_idempotency_events_cancel_and_tenant_isolation():
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        tenant = Tenant(slug="refresh-a", name="A")
+        other = Tenant(slug="refresh-b", name="B")
+        session.add_all([tenant, other])
+        session.flush()
+        admin = User(tenant_id=tenant.id, username="admin", display_name="Admin", role="admin")
+        user = User(tenant_id=tenant.id, username="user", display_name="User", role="user")
+        outsider = User(tenant_id=other.id, username="admin", display_name="Other", role="admin")
+        session.add_all([admin, user, outsider])
+        session.flush()
+    repository = CatalogRepository(factory)
+    source = repository.create_source(
+        tenant.id,
+        "Docs",
+        "website",
+        "1.0",
+        {
+            "source_type": "website",
+            "config_version": "1.0",
+            "root_url": "https://docs.example.test/",
+            "allowed_domains": ["docs.example.test"],
+        },
+        True,
+    )
+    queue = FakeIngestionQueue()
+    runtime = {
+        "catalog_repository": repository,
+        "catalog_service": CatalogService(repository),
+        "auth_repository": AuthRepository(factory),
+        "auth_service": AsyncCallAdapter(),
+        "ingestion_queue": queue,
+        "settings": SimpleNamespace(ingestion_max_attempts=3),
+    }
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def correlation(request: Request, call_next):
+        request.state.correlation_id = uuid.uuid4()
+        return await call_next(request)
+
+    app.include_router(catalog.router)
+    app.dependency_overrides[get_runtime_state] = lambda: runtime
+    selected = {"principal": _principal(tenant, user, "user")}
+    app.dependency_overrides[get_principal] = lambda: selected["principal"]
+    client = TestClient(app)
+
+    path = f"/v1/admin/knowledge-sources/{source.id}/refresh"
+    assert client.post(path, json={}, headers={"Idempotency-Key": "one"}).status_code == 403
+    selected["principal"] = _principal(tenant, admin, "admin")
+    created = client.post(path, json={}, headers={"Idempotency-Key": "one"})
+    duplicate = client.post(path, json={}, headers={"Idempotency-Key": "one"})
+    assert created.status_code == duplicate.status_code == 202
+    assert created.json()["id"] == duplicate.json()["id"]
+    run_id = created.json()["id"]
+    assert len(queue.jobs) == 2
+    assert client.get(f"/v1/admin/ingestion-runs/{run_id}/events").status_code == 200
+
+    selected["principal"] = _principal(other, outsider, "admin")
+    assert client.get(f"/v1/admin/ingestion-runs/{run_id}").status_code == 404
+    assert client.get(f"/v1/admin/ingestion-runs/{run_id}/events").status_code == 404
+
+    selected["principal"] = _principal(tenant, admin, "admin")
+    cancelled = client.post(f"/v1/admin/ingestion-runs/{run_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    with factory() as session:
+        actions = set(session.scalars(select(AuditEvent.action)))
+        assert {"ingestion_run.create", "ingestion_run.cancel", "access.denied"}.issubset(actions)

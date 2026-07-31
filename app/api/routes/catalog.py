@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
 from app.api.dependencies import get_runtime_state, require_admin
 from app.auth.security import Principal
 from app.catalog.repository import (
     CatalogNotFoundError,
+    IdempotencyConflictError,
     InvalidVersionTransitionError,
     SourceHistoryExistsError,
 )
 from app.catalog.schemas import (
+    IngestionEventResponse,
     IngestionRunResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
@@ -21,6 +25,7 @@ from app.catalog.schemas import (
     KnowledgeSourceCreate,
     KnowledgeSourceResponse,
     KnowledgeSourceUpdate,
+    SourceRefreshRequest,
     SourceVersionResponse,
 )
 
@@ -77,6 +82,10 @@ def _run_response(item) -> IngestionRunResponse:
         completed_at=item.completed_at,
         error_code=item.error_code,
         error_message=item.error_message,
+        attempt_count=item.attempt_count,
+        max_attempts=item.max_attempts,
+        cancel_requested=item.cancel_requested,
+        auto_activate=item.auto_activate,
     )
 
 
@@ -500,6 +509,141 @@ async def list_ingestion_runs(
     return [_run_response(item) for item in items]
 
 
+@router.post(
+    "/knowledge-sources/{source_id}/refresh",
+    response_model=IngestionRunResponse,
+    status_code=202,
+)
+async def refresh_source(
+    source_id: uuid.UUID,
+    payload: SourceRefreshRequest,
+    request: Request,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=255),
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    queue = runtime.get("ingestion_queue")
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Ingestion queue is unavailable.")
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {"source_id": str(source_id), "auto_activate": payload.auto_activate},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    try:
+        run, version, created = await runtime["catalog_service"].call(
+            runtime["catalog_repository"].create_refresh_job,
+            principal.tenant_id,
+            source_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            correlation_id=request.state.correlation_id,
+            auto_activate=payload.auto_activate,
+            max_attempts=runtime["settings"].ingestion_max_attempts,
+        )
+    except CatalogNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (IdempotencyConflictError, InvalidVersionTransitionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    from app.ingestion.contracts import IngestionEvent, IngestionJobContract
+
+    contract = IngestionJobContract(
+        run_id=run.id,
+        tenant_id=principal.tenant_id,
+        source_id=source_id,
+        source_version_id=version.id,
+        correlation_id=request.state.correlation_id,
+    )
+    if run.status == "queued":
+        try:
+            await queue.enqueue(contract)
+            if created:
+                await queue.publish_event(IngestionEvent(run_id=run.id, event_type="queued"))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Ingestion job was persisted but the queue is temporarily unavailable; "
+                    "retry with the same Idempotency-Key."
+                ),
+            ) from exc
+    await _audit(
+        request,
+        runtime,
+        principal,
+        "ingestion_run.create",
+        "ingestion_run",
+        run.id,
+        {"source_id": str(source_id), "auto_activate": payload.auto_activate},
+    )
+    return _run_response(run)
+
+
+@router.get("/ingestion-runs/{run_id}", response_model=IngestionRunResponse)
+async def get_ingestion_run(
+    run_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    run = await runtime["catalog_service"].call(
+        runtime["catalog_repository"].get_ingestion_run, principal.tenant_id, run_id
+    )
+    if run is None:
+        await _audit_denied(request, runtime, principal, "ingestion_run", run_id)
+        raise HTTPException(status_code=404, detail="Ingestion run was not found.")
+    await _audit(request, runtime, principal, "ingestion_run.read", "ingestion_run", run_id)
+    return _run_response(run)
+
+
+@router.get("/ingestion-runs/{run_id}/events", response_model=list[IngestionEventResponse])
+async def get_ingestion_events(
+    run_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    run = await runtime["catalog_service"].call(
+        runtime["catalog_repository"].get_ingestion_run, principal.tenant_id, run_id
+    )
+    if run is None:
+        await _audit_denied(request, runtime, principal, "ingestion_run", run_id)
+        raise HTTPException(status_code=404, detail="Ingestion run was not found.")
+    queue = runtime.get("ingestion_queue")
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Ingestion events are unavailable.")
+    events = await queue.list_events(run_id)
+    await _audit(request, runtime, principal, "ingestion_run.events", "ingestion_run", run_id)
+    return events
+
+
+@router.post("/ingestion-runs/{run_id}/cancel", response_model=IngestionRunResponse)
+async def cancel_ingestion_run(
+    run_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    try:
+        changed = await runtime["catalog_service"].call(
+            runtime["catalog_repository"].request_ingestion_cancel,
+            principal.tenant_id,
+            run_id,
+        )
+    except CatalogNotFoundError as exc:
+        await _audit_denied(request, runtime, principal, "ingestion_run", run_id)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not changed:
+        raise HTTPException(status_code=409, detail="Completed ingestion cannot be cancelled.")
+    run = await runtime["catalog_service"].call(
+        runtime["catalog_repository"].get_ingestion_run, principal.tenant_id, run_id
+    )
+    await _audit(request, runtime, principal, "ingestion_run.cancel", "ingestion_run", run_id)
+    return _run_response(run)
+
+
 async def _activate(
     source_id: uuid.UUID,
     version_id: uuid.UUID,
@@ -554,3 +698,5 @@ async def rollback_version(
     return await _activate(
         source_id, version_id, request, principal, runtime, "source_version.rollback"
     )
+    IngestionEventResponse,
+    SourceRefreshRequest,
