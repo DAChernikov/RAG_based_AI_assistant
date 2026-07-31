@@ -54,6 +54,10 @@ make run-api
 For a native worker, use localhost URLs in `.env`. For a container worker, use Compose service
 names and `host.docker.internal` for Ollama.
 
+The Compose worker mounts the host `./artifacts` directory at `/app/artifacts` and reads the
+active retriever from `/app/artifacts/artifacts_rag_baseline_latest`. Before starting it, verify
+that this directory contains `corpus.joblib`, `corpus_emb.npy`, and `meta.json`.
+
 ```bash
 curl -s http://127.0.0.1:8000/health
 curl -s http://127.0.0.1:8000/ready

@@ -76,7 +76,7 @@ services:
       GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
       MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
       WORKER_ID: ${WORKER_ID:-worker-1}
-      ARTIFACTS_DIR: /app/artifacts
+      ARTIFACTS_DIR: /app/artifacts/artifacts_rag_baseline_latest
     env_file:
       - path: .env
         required: false

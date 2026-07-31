@@ -136,6 +136,8 @@ MODEL_API_BASE_URL=http://127.0.0.1:11434/v1
 
 Compose API/worker используют `host.docker.internal`. API ограничен 512 MB, PostgreSQL —
 512 MB, Redis — 320 MB с `noeviction`, worker — 6 GB. Redis Streams ограничены maxlen/TTL.
+Worker монтирует `./artifacts` в `/app/artifacts` и использует активную версию retriever из
+`/app/artifacts/artifacts_rag_baseline_latest`.
 
 ## Linux/CI CPU profile
 
