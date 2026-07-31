@@ -71,6 +71,7 @@ def worker_context():
         user = User(
             tenant_id=tenant.id,
             external_id="development-user",
+            username="development-user",
             display_name="Development",
         )
         session.add(user)
@@ -120,6 +121,28 @@ async def test_worker_completes_and_duplicate_delivery_is_idempotent(worker_cont
     assert queue.acked == ["1-0", "2-0"]
     with factory() as session:
         assert session.query(Answer).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_regenerate_job_with_active_lease(worker_context):
+    repository, _, identity = worker_context
+    contract = create_contract(repository, identity)
+    processor = FakeProcessor()
+    queue = FakeQueue()
+    worker = InferenceWorker(repository, queue, processor, worker_id="second-worker")
+
+    claimed = repository.claim_job(
+        contract.job_id,
+        worker_id="first-worker",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+
+    await worker.process_message("2-0", {"contract": contract.model_dump_json()})
+
+    assert processor.calls == 0
+    assert queue.events == []
+    assert queue.acked == []
 
 
 @pytest.mark.asyncio

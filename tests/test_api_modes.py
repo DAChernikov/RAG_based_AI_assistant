@@ -4,8 +4,9 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_runtime_state
+from app.api.dependencies import get_principal, get_runtime_state
 from app.api.routes import ask, jobs
+from app.auth.security import Principal
 from app.inference.contracts import InferenceJobContract
 
 
@@ -24,6 +25,14 @@ def build_client(runtime):
     app.include_router(ask.router)
     app.include_router(jobs.router)
     app.dependency_overrides[get_runtime_state] = lambda: runtime
+    app.dependency_overrides[get_principal] = lambda: Principal(
+        tenant_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        username="test-user",
+        role="user",
+        auth_method="test",
+        scopes=frozenset({"*"}),
+    )
     return TestClient(app)
 
 
@@ -55,7 +64,15 @@ class FakeQueuedApplication:
             status="queued",
         )
 
-    async def submit(self, payload, *, idempotency_key, conversation_id):
+    async def submit(
+        self,
+        payload,
+        *,
+        tenant_id,
+        user_id,
+        idempotency_key,
+        conversation_id,
+    ):
         self.idempotency_key = idempotency_key
         return SimpleNamespace(job=self.job, created=True), self.contract
 

@@ -23,6 +23,7 @@ def repository():
         user = User(
             tenant_id=tenant.id,
             external_id="development-user",
+            username="development-user",
             display_name="Development User",
         )
         session.add(user)

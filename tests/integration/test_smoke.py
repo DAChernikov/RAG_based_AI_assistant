@@ -82,13 +82,15 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
         tenant = Tenant(slug=tenant_slug, name="Integration")
         session.add(tenant)
         session.flush()
-        session.add(
-            User(
-                tenant_id=tenant.id,
-                external_id=user_external_id,
-                display_name="Integration",
-            )
+        user = User(
+            tenant_id=tenant.id,
+            external_id=user_external_id,
+            username=user_external_id,
+            display_name="Integration",
         )
+        session.add(user)
+        session.flush()
+        identity = tenant.id, user.id
 
     redis = Redis.from_url(redis_url, decode_responses=True)
     queue = RedisInferenceQueue(redis)
@@ -121,6 +123,8 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
 
     creation, contract = await application.submit(
         {"question": "integration question", "mode": None, "top_k": None, "max_new_tokens": None},
+        tenant_id=identity[0],
+        user_id=identity[1],
         idempotency_key=f"key-{suffix}",
         conversation_id=None,
     )
@@ -136,6 +140,8 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
 
     reused, _ = await application.submit(
         {"question": "integration question", "mode": None, "top_k": None, "max_new_tokens": None},
+        tenant_id=identity[0],
+        user_id=identity[1],
         idempotency_key=f"key-{suffix}",
         conversation_id=None,
     )
@@ -149,6 +155,8 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
                 "top_k": None,
                 "max_new_tokens": None,
             },
+            tenant_id=identity[0],
+            user_id=identity[1],
             idempotency_key=f"key-{suffix}",
             conversation_id=None,
         )
@@ -209,13 +217,15 @@ async def test_real_queue_retry_and_terminal_dlq(monkeypatch):
         tenant = Tenant(slug=tenant_slug, name="Integration failures")
         session.add(tenant)
         session.flush()
-        session.add(
-            User(
-                tenant_id=tenant.id,
-                external_id=user_external_id,
-                display_name="Integration failures",
-            )
+        user = User(
+            tenant_id=tenant.id,
+            external_id=user_external_id,
+            username=user_external_id,
+            display_name="Integration failures",
         )
+        session.add(user)
+        session.flush()
+        identity = tenant.id, user.id
 
     redis = Redis.from_url(redis_url, decode_responses=True)
     queue = RedisInferenceQueue(redis)
@@ -227,6 +237,8 @@ async def test_real_queue_retry_and_terminal_dlq(monkeypatch):
     retry_worker = InferenceWorker(repository, queue, retry_processor, worker_id=f"retry-{suffix}")
     retry_creation, retry_contract = await application.submit(
         {"question": "retry", "mode": None, "top_k": None, "max_new_tokens": None},
+        tenant_id=identity[0],
+        user_id=identity[1],
         idempotency_key=f"retry-{suffix}",
         conversation_id=None,
     )
@@ -245,6 +257,8 @@ async def test_real_queue_retry_and_terminal_dlq(monkeypatch):
 
     failed_creation, failed_contract = await application.submit(
         {"question": "fail", "mode": None, "top_k": None, "max_new_tokens": None},
+        tenant_id=identity[0],
+        user_id=identity[1],
         idempotency_key=f"fail-{suffix}",
         conversation_id=None,
     )
