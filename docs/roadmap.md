@@ -61,18 +61,31 @@ Status: implemented on `feature/product-v1`.
 Website crawling, Git clone, JDBC connectivity, parsing, embeddings and scheduling remain out
 of scope. Lifecycle tests use an internal fixture connector through the application service.
 
+## Iteration 5 — Website/Git connectors and incremental ingestion
+
+Status: implemented on `feature/product-v1`.
+
+- SSRF-protected Website crawling with sitemap/link discovery, limits and conditional fetch;
+- isolated Git fetch pinned to a resolved commit, safe traversal and structure-aware parsing;
+- incremental add/change/rename/delete discovery and content-addressed document/chunk reuse;
+- separate Redis ingestion stream and worker with leases, reclaim, bounded retry and DLQ;
+- admin refresh, status, event and cancellation API with tenant isolation and audit events;
+- immutable staging, validation, optional atomic activation and sanitized failures.
+
+JDBC connectivity, scheduler, embeddings, pgvector, retrieval integration and Web UI remain
+out of scope.
+
 ## Later planned stages
 
-1. Website and Git connectors with incremental ingestion and structure-aware parsing.
-2. Isolated allowlisted JDBC metadata connector, followed by the Neon demo source.
-3. BGE-M3 embedding service, pgvector, hybrid retrieval, and index activation/rollback.
-4. Multi-label `RoutePlan`, parallel retrieval branches, merge/rerank, and hybrid answers.
-5. SQL AST/schema validation, safe `EXPLAIN`, bounded repair, and only then evaluation of a
+1. Isolated allowlisted JDBC metadata connector, followed by the Neon demo source.
+2. BGE-M3 embedding service, pgvector, hybrid retrieval, and index activation/rollback.
+3. Multi-label `RoutePlan`, parallel retrieval branches, merge/rerank, and hybrid answers.
+4. SQL AST/schema validation, safe `EXPLAIN`, bounded repair, and only then evaluation of a
    dedicated SQL expert model.
-6. React/TypeScript Web UI for chat, history, sources, SQL results, and administration.
-7. Model/prompt registry, S3 model artifact cache workflow, evaluation framework, and mature
+5. React/TypeScript Web UI for chat, history, sources, SQL results, and administration.
+6. Model/prompt registry, S3 model artifact cache workflow, evaluation framework, and mature
    observability.
-8. Production deployment profiles and optional larger generator hardware.
+7. Production deployment profiles and optional larger generator hardware.
 
 Stage ordering may change after measurements, but no stage should claim a future capability
 before its implementation and verification.

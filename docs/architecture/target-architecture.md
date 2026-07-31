@@ -107,11 +107,20 @@ Website ingestion supports HTML pages, documentation sites, Habr, Confluence, ta
 blocks, lists, and other textual elements. Authentication is connector-specific. Audio and
 video extraction are explicitly out of scope.
 
+Iteration 5 implements bounded HTML crawling, sitemap and link discovery, canonical URLs,
+conditional HTTP discovery, structured extraction and SSRF checks before every request and
+redirect. Site-specific browser rendering and Confluence adapters are future extensions.
+
 ### Git sources
 
 Git ingestion supports a repository or managed group, branch/tag/commit pinning, recursive
 file traversal, include/exclude patterns, credential references, and structure-aware parsing
 for supported languages.
+
+Iteration 5 implements one repository per source, exact ref-to-commit resolution, safe
+recursive tracked-file traversal, incremental checksums/rename detection and structural chunks
+for Markdown, Python, SQL, Scala/Java and YAML/JSON. Repository-group orchestration remains
+future work.
 
 ### JDBC metadata sources
 
@@ -139,6 +148,12 @@ Each source refresh will:
 
 Queries pin or resolve an active knowledge-base version so results remain explainable during
 concurrent ingestion. Failed staging versions never become visible.
+
+Iteration 5 stores normalized documents and chunks through tenant-scoped content-addressed
+blobs, so immutable version rows can reuse unchanged content. PostgreSQL remains authoritative;
+a separate Redis Stream delivers refresh jobs to a dedicated ingestion worker. Durable job
+leases, heartbeats, pending reclaim, bounded retry, cancellation and a DLQ protect repeated
+delivery. Embedding/index staging and scheduled refresh are not implemented yet.
 
 ## Retrieval and answer composition
 

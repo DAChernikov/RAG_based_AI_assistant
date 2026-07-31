@@ -11,12 +11,13 @@ self-hosted OpenAI-compatible HTTP API. Коммерческие внешние 
   Redis Streams, а retriever и model client живут в inference worker.
 
 Локальная аутентификация, tenant isolation, роли `admin`/`user`, API keys и audit log
-реализованы в Iteration 3. Web UI, source connectors, pgvector и multi-label retrieval пока
-не реализованы.
+реализованы в Iteration 3. Website/Git connectors и отдельный incremental ingestion worker
+реализованы в Iteration 5. Web UI, JDBC connector, pgvector и multi-label retrieval пока не
+реализованы.
 
-Iteration 4 добавляет tenant-scoped каталог knowledge bases и источников, typed Website/Git/JDBC
-configs и immutable source versions с atomic activation/rollback. Реальные crawl/clone/JDBC,
-parsing, embeddings и scheduler пока не реализованы.
+Каталог поддерживает typed Website/Git/JDBC configs и immutable source versions с atomic
+activation/rollback. Website crawl и Git fetch/parse работают по on-demand refresh; JDBC,
+embeddings, retrieval integration и scheduler пока не реализованы.
 
 ## Реализованная runtime-схема
 
@@ -27,12 +28,12 @@ Telegram / HTTP client
       FastAPI API ----------------> PostgreSQL 16 (system of record)
           |                                |
           +------ Redis Streams jobs ------+
-                         |
-                         v
-                 inference worker
-                  |             |
-                  v             v
-          current retriever   self-hosted model API
+                    /              \
+                   v                v
+          inference worker    ingestion worker
+             |       |          |          |
+             v       v          v          v
+       retriever  model API  Website Git  PostgreSQL content
 ```
 
 Redis хранит delivery/events/heartbeat, но не является единственным хранилищем результата.
@@ -52,6 +53,7 @@ poetry run python -m app.state.bootstrap_admin \
   --username admin \
   --display-name "Local administrator"
 make run-worker
+make run-ingestion-worker
 make run-api
 ```
 
@@ -117,7 +119,12 @@ Admin knowledge catalog:
 - `GET|PATCH|DELETE /v1/admin/knowledge-sources/{id}`;
 - knowledge base/source linking;
 - version and ingestion-run inspection;
+- on-demand source refresh, ingestion events/status and cancellation;
 - version activation and rollback.
+
+`POST /v1/admin/knowledge-sources/{id}/refresh` требует `Idempotency-Key` и создаёт durable
+ingestion run. Website connector соблюдает allowlist/limits и SSRF policy; Git connector делает
+изолированный fetch и фиксирует resolved commit SHA. JDBC refresh пока не реализован.
 
 `/health` and sanitized `/ready` remain public. `/admin/runtime` is admin-only. Jobs,
 conversations and SSE streams are filtered by authenticated tenant and user. Telegram and
@@ -164,6 +171,10 @@ Manifest and source objects become immutable after `staged`. Activation locks th
 atomically supersedes the previous active version. A database constraint allows only one
 active version per source.
 
+Normalized documents and chunks reference tenant-scoped content-addressed blobs. Unchanged
+content is reused between immutable versions. Run/version failures are sanitized together;
+failed and staging versions are not used by retrieval.
+
 ## MacBook Air 24 GB profile
 
 Рекомендуемый профиль:
@@ -171,6 +182,7 @@ active version per source.
 - PostgreSQL, Redis и API — Docker/OrbStack;
 - Ollama — нативно на macOS для Metal;
 - worker — один процесс; нативно для MPS либо CPU Docker container;
+- ingestion worker — отдельный лёгкий process/container без ML dependencies;
 - одна generation model в памяти;
 - API в queued mode не импортирует и не загружает Sentence Transformer.
 
@@ -230,6 +242,10 @@ models и training opt-in; `RUN_TRAINING = False` по умолчанию. Ре�
 | `INFERENCE_WAIT_TIMEOUT_SEC` | ожидание backward-compatible `/ask` |
 | `INFERENCE_MAX_ATTEMPTS` | bounded worker attempts |
 | `WORKER_ID` | стабильный worker identity |
+| `INGESTION_JOBS_STREAM` | отдельный Redis Stream ingestion jobs |
+| `INGESTION_WORKER_ID` | стабильный ingestion worker identity |
+| `INGESTION_LEASE_SEC` | lease для безопасного reclaim ingestion job |
+| `INGESTION_MAX_ATTEMPTS` | bounded ingestion attempts до DLQ |
 | `AUTH_DISABLED` | explicit dev/test compatibility mode |
 | `JWT_SECRET` | local JWT signing secret, минимум 32 символа |
 | `ACCESS_TOKEN_TTL_SEC` | lifetime короткоживущего access token |
