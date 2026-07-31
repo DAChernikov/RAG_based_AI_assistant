@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 from fastapi import APIRouter, Request
@@ -23,7 +24,7 @@ async def ready(request: Request) -> ReadyResponse:
     if mode == "queued":
         engine = runtime.get("database_engine")
         queue = runtime.get("queue")
-        database_ready = bool(engine and database_is_ready(engine))
+        database_ready = bool(engine and await asyncio.to_thread(database_is_ready, engine))
         redis_ready = bool(queue and await queue.ping())
         if redis_ready:
             try:

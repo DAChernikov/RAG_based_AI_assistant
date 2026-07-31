@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from app.api.config import settings
-from app.api.dependencies import get_runtime_state
+from app.api.dependencies import get_runtime_state, require_scope
 from app.api.schemas import AskRequest, AskResponse, RetrievedDocument
 from app.api.services.llm_service import LLMRateLimitError, LLMTemporaryUnavailableError
 from app.api.services.router_service import RouterService
 from app.api.services.sql_service import SQLService
+from app.auth.security import Principal
 from app.state.repositories import (
     ConversationAccessError,
     IdempotencyConflictError,
@@ -75,13 +76,15 @@ async def _direct_ask(payload: AskRequest, runtime: dict) -> tuple[dict, str]:
         raise HTTPException(status_code=500, detail="Inference failed.") from exc
 
 
-async def _submit_queued(payload, runtime, idempotency_key):
+async def _submit_queued(payload, runtime, idempotency_key, principal: Principal):
     application = runtime.get("queued_application")
     if application is None:
         raise HTTPException(status_code=503, detail="Queued inference is not ready.")
     try:
         return await application.submit(
             payload.model_dump(mode="json"),
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
             idempotency_key=idempotency_key,
             conversation_id=payload.conversation_id,
         )
@@ -101,11 +104,12 @@ async def _submit_queued(payload, runtime, idempotency_key):
 async def ask(
     payload: AskRequest,
     response: Response,
+    principal: Principal = Depends(require_scope("inference:write")),
     runtime: dict = Depends(get_runtime_state),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> AskResponse:
     if runtime.get("execution_mode") == "queued":
-        creation, contract = await _submit_queued(payload, runtime, idempotency_key)
+        creation, contract = await _submit_queued(payload, runtime, idempotency_key, principal)
         response.headers["X-Inference-Job-Id"] = str(creation.job.id)
         response.headers["X-Correlation-Id"] = str(contract.correlation_id)
         terminal = await runtime["queued_application"].wait_for_terminal(creation.job.id)
@@ -152,12 +156,13 @@ async def ask(
 @router.post("/ask/stream")
 async def ask_stream(
     payload: AskRequest,
+    principal: Principal = Depends(require_scope("inference:write")),
     runtime: dict = Depends(get_runtime_state),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
     if runtime.get("execution_mode") == "queued":
-        creation, _ = await _submit_queued(payload, runtime, idempotency_key)
+        creation, _ = await _submit_queued(payload, runtime, idempotency_key, principal)
 
         async def queued_events():
             async for redis_id, event in runtime["queue"].iter_events(

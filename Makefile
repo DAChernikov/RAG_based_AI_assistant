@@ -24,6 +24,13 @@ migrate-down:
 seed-dev:
 	poetry run python -m app.state.seed
 
+bootstrap-admin:
+	poetry run python -m app.state.bootstrap_admin \
+		--tenant-slug "$(TENANT_SLUG)" \
+		--tenant-name "$(TENANT_NAME)" \
+		--username "$(ADMIN_USERNAME)" \
+		--display-name "$(ADMIN_DISPLAY_NAME)"
+
 test:
 	poetry run pytest -m "not integration"
 

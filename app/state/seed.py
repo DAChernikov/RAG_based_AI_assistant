@@ -26,7 +26,9 @@ def seed_development_identity() -> tuple[str, str]:
             user = User(
                 tenant_id=tenant.id,
                 external_id=settings.compatibility_user_external_id,
+                username=settings.compatibility_user_external_id,
                 display_name="Development User",
+                role="admin",
             )
             session.add(user)
             session.flush()

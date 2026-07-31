@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 import time
 import uuid
@@ -116,7 +117,12 @@ class InferenceWorker:
             await self.queue.ack(message_id)
             return
 
-        running = self.repository.mark_running(contract.job_id)
+        claimed = self.repository.claim_job(
+            contract.job_id, self.worker_id, settings.worker_lease_sec
+        )
+        if claimed is None:
+            return
+        running, lease_token = claimed
         await self._event(
             contract,
             "started",
@@ -124,6 +130,7 @@ class InferenceWorker:
         )
         metric("jobs_running")
         started = time.monotonic()
+        lease_task = asyncio.create_task(self._renew_lease(contract.job_id, lease_token))
 
         async def emit(event_type, payload):
             await self._event(contract, event_type, payload)
@@ -136,6 +143,7 @@ class InferenceWorker:
                 result=result,
                 model_name=settings.generation_model,
                 latency_ms=latency_ms,
+                lease_token=lease_token,
             )
             await self._event(
                 contract,
@@ -157,7 +165,12 @@ class InferenceWorker:
             current = self.repository.get_job(contract.job_id)
             if current.attempt_count < current.max_attempts:
                 code = "temporary_inference_error"
-                self.repository.mark_retry(contract.job_id, code, "Temporary inference failure.")
+                self.repository.mark_retry(
+                    contract.job_id,
+                    code,
+                    "Temporary inference failure.",
+                    lease_token,
+                )
                 await self._event(
                     contract,
                     "retrying",
@@ -172,13 +185,30 @@ class InferenceWorker:
                 await self.queue.ack(message_id)
                 metric("retries")
             else:
-                await self._terminal_failure(message_id, contract, "retry_exhausted")
+                await self._terminal_failure(message_id, contract, "retry_exhausted", lease_token)
         except Exception:
-            await self._terminal_failure(message_id, contract, "inference_failed")
+            await self._terminal_failure(message_id, contract, "inference_failed", lease_token)
+        finally:
+            lease_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lease_task
 
-    async def _terminal_failure(self, message_id, contract, code: str) -> None:
+    async def _renew_lease(self, job_id, lease_token) -> None:
+        interval = max(1, settings.worker_lease_sec // 3)
+        while True:
+            await asyncio.sleep(interval)
+            renewed = await asyncio.to_thread(
+                self.repository.renew_job_lease,
+                job_id,
+                lease_token,
+                settings.worker_lease_sec,
+            )
+            if not renewed:
+                return
+
+    async def _terminal_failure(self, message_id, contract, code: str, lease_token=None) -> None:
         message = "Inference job failed. See worker logs using the correlation ID."
-        self.repository.mark_failed(contract.job_id, code, message)
+        self.repository.mark_failed(contract.job_id, code, message, lease_token)
         await self._event(
             contract,
             "failed",

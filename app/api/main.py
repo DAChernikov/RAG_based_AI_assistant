@@ -1,11 +1,19 @@
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.api.config import settings
-from app.api.routes import admin, ask, health, jobs
+from app.api.routes import admin, api_keys, ask, auth, health, jobs, users
 from app.api.services.artifact_manager import ArtifactManager
 from app.api.services.llm_service import LLMService
+
+
+def validate_auth_configuration() -> None:
+    if settings.auth_disabled and settings.app_env not in {"dev", "test"}:
+        raise RuntimeError("AUTH_DISABLED is allowed only in dev/test environments.")
+    if not settings.auth_disabled and len(settings.jwt_secret or "") < 32:
+        raise RuntimeError("JWT_SECRET with at least 32 characters is required.")
 
 
 @asynccontextmanager
@@ -13,6 +21,7 @@ async def lifespan(app: FastAPI):
     mode = settings.inference_execution_mode.lower()
     if mode not in {"direct", "queued"}:
         raise RuntimeError("INFERENCE_EXECUTION_MODE must be direct or queued.")
+    validate_auth_configuration()
 
     runtime = {
         "execution_mode": mode,
@@ -27,10 +36,29 @@ async def lifespan(app: FastAPI):
         "repository": None,
         "queue": None,
         "queued_application": None,
+        "auth_repository": None,
+        "auth_service": None,
         "startup_error": None,
     }
 
     try:
+        from app.state.auth_repository import AuthRepository
+        from app.state.database import create_database_engine, create_session_factory
+        from app.state.repositories import ApplicationRepository, AsyncApplicationRepository
+
+        engine = create_database_engine()
+        session_factory = create_session_factory(engine)
+        sync_repository = ApplicationRepository(session_factory)
+        repository = AsyncApplicationRepository(sync_repository)
+        auth_repository = AuthRepository(session_factory)
+        runtime["database_engine"] = engine
+        runtime["repository"] = repository
+        runtime["auth_repository"] = auth_repository
+        if not settings.auth_disabled:
+            from app.auth.service import AuthService
+
+            runtime["auth_service"] = AuthService(auth_repository)
+
         if mode == "direct":
             from app.api.services.rag_service import RAGService
             from app.api.services.retriever_loader import RetrieverLoader
@@ -50,14 +78,8 @@ async def lifespan(app: FastAPI):
         else:
             from app.inference.application import QueuedInferenceApplication
             from app.inference.redis_queue import RedisInferenceQueue
-            from app.state.database import create_database_engine, create_session_factory
-            from app.state.repositories import ApplicationRepository
 
-            engine = create_database_engine()
-            repository = ApplicationRepository(create_session_factory(engine))
             queue = RedisInferenceQueue()
-            runtime["database_engine"] = engine
-            runtime["repository"] = repository
             runtime["queue"] = queue
             runtime["queued_application"] = QueuedInferenceApplication(repository, queue)
             await queue.ensure_group()
@@ -87,7 +109,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.middleware("http")
+async def correlation_middleware(request: Request, call_next):
+    raw = request.headers.get("X-Correlation-Id")
+    try:
+        correlation_id = uuid.UUID(raw) if raw else uuid.uuid4()
+    except ValueError:
+        correlation_id = uuid.uuid4()
+    request.state.correlation_id = correlation_id
+    response = await call_next(request)
+    response.headers["X-Correlation-Id"] = str(correlation_id)
+    return response
+
+
 app.include_router(health.router)
+app.include_router(auth.router)
 app.include_router(ask.router)
 app.include_router(jobs.router)
+app.include_router(api_keys.router)
+app.include_router(users.router)
 app.include_router(admin.router)

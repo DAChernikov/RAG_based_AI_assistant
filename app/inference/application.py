@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 from typing import Any
 
@@ -9,7 +10,11 @@ from app.inference.contracts import InferenceJobContract, QueuedEvent, QueuedPay
 from app.inference.redis_queue import RedisInferenceQueue
 from app.observability import metric
 from app.state.models import JobStatus
-from app.state.repositories import ApplicationRepository, JobCreationResult
+from app.state.repositories import JobCreationResult
+
+
+async def _resolve(value):
+    return await value if inspect.isawaitable(value) else value
 
 
 def serialize_job(job) -> dict[str, Any]:
@@ -54,7 +59,7 @@ def serialize_job(job) -> dict[str, Any]:
 
 
 class QueuedInferenceApplication:
-    def __init__(self, repository: ApplicationRepository, queue: RedisInferenceQueue):
+    def __init__(self, repository, queue: RedisInferenceQueue):
         self.repository = repository
         self.queue = queue
 
@@ -62,13 +67,11 @@ class QueuedInferenceApplication:
         self,
         payload: dict[str, Any],
         *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
         idempotency_key: str | None,
         conversation_id: uuid.UUID | None,
     ) -> tuple[JobCreationResult, InferenceJobContract]:
-        tenant_id, user_id = self.repository.get_compatibility_identity(
-            settings.compatibility_tenant_slug,
-            settings.compatibility_user_external_id,
-        )
         request_payload = {
             "question": payload["question"],
             "mode": payload.get("mode"),
@@ -76,15 +79,17 @@ class QueuedInferenceApplication:
             "max_new_tokens": payload.get("max_new_tokens"),
             "conversation_id": str(conversation_id) if conversation_id else None,
         }
-        creation = self.repository.create_job(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            question=payload["question"],
-            request_payload=request_payload,
-            contract_version="1.0",
-            max_attempts=settings.inference_max_attempts,
-            conversation_id=conversation_id,
-            idempotency_key=idempotency_key,
+        creation = await _resolve(
+            self.repository.create_job(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                question=payload["question"],
+                request_payload=request_payload,
+                contract_version="1.0",
+                max_attempts=settings.inference_max_attempts,
+                conversation_id=conversation_id,
+                idempotency_key=idempotency_key,
+            )
         )
         contract = InferenceJobContract(
             job_id=creation.job.id,
@@ -116,7 +121,7 @@ class QueuedInferenceApplication:
     async def wait_for_terminal(self, job_id: uuid.UUID):
         deadline = asyncio.get_running_loop().time() + settings.inference_wait_timeout_sec
         while asyncio.get_running_loop().time() < deadline:
-            job = self.repository.get_job(job_id)
+            job = await _resolve(self.repository.get_job(job_id))
             if job is not None and job.status in {
                 JobStatus.COMPLETED.value,
                 JobStatus.FAILED.value,

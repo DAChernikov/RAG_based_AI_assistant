@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_APP_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:-rag-dev-only}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -50,6 +50,8 @@ services:
       MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
       GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
       MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
+      AUTH_DISABLED: ${AUTH_DISABLED:-false}
+      JWT_SECRET: ${JWT_SECRET:-}
     env_file:
       - path: .env
         required: false
@@ -99,6 +101,7 @@ services:
       dockerfile: infra/bot.Dockerfile
     environment:
       API_BASE_URL: http://api:8000
+      API_KEY: ${API_KEY:-}
     env_file:
       - path: .env
         required: false

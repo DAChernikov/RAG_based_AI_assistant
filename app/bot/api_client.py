@@ -14,6 +14,10 @@ class APIClient:
         self.base_url = bot_settings.api_base_url.rstrip("/")
         self.timeout = bot_settings.request_timeout
 
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"X-API-Key": bot_settings.api_key} if bot_settings.api_key else {}
+
     async def ask(
         self,
         question: str,
@@ -27,7 +31,7 @@ class APIClient:
             payload["top_k"] = top_k
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.base_url}/ask", json=payload)
+            response = await client.post(f"{self.base_url}/ask", json=payload, headers=self.headers)
             response.raise_for_status()
             return response.json()
 
@@ -48,7 +52,7 @@ class APIClient:
                 "POST",
                 f"{self.base_url}/ask/stream",
                 json=payload,
-                headers={"Accept": "text/event-stream"},
+                headers={"Accept": "text/event-stream", **self.headers},
             ) as response:
                 response.raise_for_status()
 

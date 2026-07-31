@@ -86,6 +86,16 @@ class Settings(BaseSettings):
     inference_retry_backoff_sec: float = 1.0
     compatibility_tenant_slug: str = "development"
     compatibility_user_external_id: str = "development-user"
+    auth_disabled: bool = False
+    jwt_secret: str | None = None
+    jwt_issuer: str = "rag-based-ai-assistant"
+    jwt_audience: str = "rag-api"
+    access_token_ttl_sec: int = 900
+    refresh_token_ttl_sec: int = 2_592_000
+    api_key_default_ttl_sec: int = 7_776_000
+    login_rate_limit_attempts: int = 5
+    login_rate_limit_window_sec: int = 60
+    worker_lease_sec: int = 300
 
     stream_edit_interval_sec: float = 1.0
     stream_min_chars_delta: int = 40
