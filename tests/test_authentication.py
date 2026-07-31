@@ -17,6 +17,21 @@ from app.state.auth_repository import AuthRepository
 from app.state.models import APIKey, AuditEvent, Base, RefreshSession, Tenant, User
 
 
+class FakeRateLimiter:
+    def __init__(self, attempts=2):
+        self.attempts = attempts
+        self.counts = {}
+
+    async def check(self, key):
+        count = self.counts.get(key, 0) + 1
+        self.counts[key] = count
+        if count > self.attempts:
+            raise AuthenticationError("Too many login attempts. Try again later.")
+
+    async def reset(self, key):
+        self.counts.pop(key, None)
+
+
 @pytest.fixture
 def auth_context(monkeypatch):
     monkeypatch.setattr(settings, "jwt_secret", "test-only-secret-with-at-least-32-characters")
@@ -61,7 +76,7 @@ def auth_context(monkeypatch):
         session.add_all([admin, user, outsider])
         session.flush()
     repository = AuthRepository(factory)
-    service = AuthService(repository)
+    service = AuthService(repository, FakeRateLimiter())
     return service, repository, factory, admin, user, outsider
 
 
