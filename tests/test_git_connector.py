@@ -5,7 +5,12 @@ import subprocess
 import pytest
 
 from app.catalog.configs import GitSourceConfig
-from app.connectors.base import CredentialMaterial, CredentialResolver, PreviousObject
+from app.connectors.base import (
+    CredentialIsolationError,
+    CredentialMaterial,
+    CredentialResolver,
+    PreviousObject,
+)
 from app.connectors.git import GitConnector
 
 
@@ -95,3 +100,33 @@ async def test_git_incremental_rename_delete_and_structure_parsing(tmp_path):
     sql = next(item for item in second.documents if item.object_key == "schema.sql")
     assert sql.metadata["language"] == "sql"
     assert sql.chunks[0].metadata["symbol"] == "users"
+
+
+def test_git_environment_isolated_from_host_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", "/unsafe/host-home")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/unsafe/global-config")
+    environment = GitConnector._isolated_environment(
+        tmp_path,
+        CredentialMaterial(
+            git_environment={"GIT_USERNAME": "test-user", "GIT_PASSWORD": "test-password"}
+        ),
+        "https://git.example.test/team/project.git",
+    )
+    assert environment["HOME"] != "/unsafe/host-home"
+    assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_ASKPASS"].startswith(str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_git_rejects_unapproved_credential_environment(tmp_path):
+    class UnsafeResolver(CredentialResolver):
+        async def resolve(self, reference: str) -> CredentialMaterial:
+            return CredentialMaterial(git_environment={"GIT_SSH_COMMAND": "unsafe"})
+
+    connector = GitConnector(UnsafeResolver())
+    config = make_config(tmp_path, "deadbeef").model_copy(
+        update={"credential_ref": "credential:git"}
+    )
+    with pytest.raises(CredentialIsolationError):
+        await connector.discover(config)

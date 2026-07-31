@@ -30,7 +30,7 @@ class IngestionPipeline:
         self.website_connector = website_connector
         self.git_connector = git_connector
 
-    async def execute(self, contract, emit) -> None:
+    async def execute(self, contract, emit, *, lease_token: uuid.UUID | None = None) -> None:
         run = await self._call(
             self.repository.get_ingestion_run, contract.tenant_id, contract.run_id
         )
@@ -54,6 +54,8 @@ class IngestionPipeline:
                 contract.source_id,
                 contract.source_version_id,
                 SourceVersionStatus.INGESTING.value,
+                run_id=contract.run_id if lease_token else None,
+                lease_token=lease_token,
             )
         if version.status in {
             SourceVersionStatus.DISCOVERED.value,
@@ -109,6 +111,8 @@ class IngestionPipeline:
                 "config_version": version.config_snapshot["config_version"],
                 "connector_version": run.connector_version,
                 "source_revision": discovery.source_revision,
+                "discovery_complete": discovery.complete,
+                "incomplete_reasons": list(discovery.incomplete_reasons),
                 "incremental": {
                     "added": len(discovery.added),
                     "modified": len(discovery.modified),
@@ -127,6 +131,8 @@ class IngestionPipeline:
                 previous_version_id,
                 manifest,
                 content_checksum,
+                run_id=contract.run_id if lease_token else None,
+                lease_token=lease_token,
             )
             await self._call(
                 self.repository.transition_version,
@@ -134,6 +140,8 @@ class IngestionPipeline:
                 contract.source_id,
                 contract.source_version_id,
                 SourceVersionStatus.STAGED.value,
+                run_id=contract.run_id if lease_token else None,
+                lease_token=lease_token,
             )
             version.status = SourceVersionStatus.STAGED.value
         if await self._cancelled(contract.run_id):
@@ -146,6 +154,8 @@ class IngestionPipeline:
                 contract.source_id,
                 contract.source_version_id,
                 SourceVersionStatus.VALIDATING.value,
+                run_id=contract.run_id if lease_token else None,
+                lease_token=lease_token,
             )
             version.status = SourceVersionStatus.VALIDATING.value
         if version.status == SourceVersionStatus.VALIDATING.value:
@@ -155,6 +165,8 @@ class IngestionPipeline:
                 contract.source_id,
                 contract.source_version_id,
                 SourceVersionStatus.READY.value,
+                run_id=contract.run_id if lease_token else None,
+                lease_token=lease_token,
             )
         if await self._cancelled(contract.run_id):
             raise IngestionCancelled()
@@ -165,13 +177,15 @@ class IngestionPipeline:
                 contract.tenant_id,
                 contract.source_id,
                 contract.source_version_id,
+                run_id=contract.run_id if lease_token else None,
+                lease_token=lease_token,
             )
 
     async def _cancelled(self, run_id: uuid.UUID) -> bool:
         return await self._call(self.repository.ingestion_cancel_requested, run_id)
 
     @staticmethod
-    async def _call(method, *args):
+    async def _call(method, *args, **kwargs):
         import asyncio
 
-        return await asyncio.to_thread(method, *args)
+        return await asyncio.to_thread(method, *args, **kwargs)

@@ -7,11 +7,49 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+_ALLOWED_HTTP_HEADERS = frozenset({"authorization", "cookie", "x-api-key"})
+_ALLOWED_GIT_ENVIRONMENT = frozenset(
+    {"GIT_USERNAME", "GIT_PASSWORD", "SSH_PRIVATE_KEY", "SSH_KNOWN_HOSTS", "SSH_AUTH_SOCK"}
+)
+_ALLOWED_DATABASE_PARAMETERS = frozenset(
+    {"username", "password", "sslrootcert", "sslcert", "sslkey"}
+)
+
+
+class ConnectorError(RuntimeError):
+    pass
+
+
+class CredentialIsolationError(ConnectorError):
+    pass
+
+
+class TransientConnectorError(ConnectorError):
+    pass
+
+
+class SourceLimitError(ConnectorError):
+    pass
+
+
+class SSRFProtectionError(ConnectorError):
+    pass
+
 
 @dataclass(frozen=True)
 class CredentialMaterial:
     http_headers: dict[str, str] = field(default_factory=dict)
     git_environment: dict[str, str] = field(default_factory=dict)
+    database_parameters: dict[str, str] = field(default_factory=dict)
+
+
+def validate_credential_material(material: CredentialMaterial) -> CredentialMaterial:
+    invalid_headers = set(map(str.casefold, material.http_headers)) - _ALLOWED_HTTP_HEADERS
+    invalid_git = set(material.git_environment) - _ALLOWED_GIT_ENVIRONMENT
+    invalid_database = set(material.database_parameters) - _ALLOWED_DATABASE_PARAMETERS
+    if invalid_headers or invalid_git or invalid_database:
+        raise CredentialIsolationError("Credential material contains unsupported fields.")
+    return material
 
 
 class CredentialResolver(abc.ABC):
@@ -37,17 +75,24 @@ class EnvironmentCredentialResolver(CredentialResolver):
             payload = json.loads(raw)
             http_headers = payload.get("http_headers", {})
             git_environment = payload.get("git_environment", {})
-            if not isinstance(http_headers, dict) or not isinstance(git_environment, dict):
+            database_parameters = payload.get("database_parameters", {})
+            if not all(
+                isinstance(item, dict)
+                for item in (http_headers, git_environment, database_parameters)
+            ):
                 raise ValueError("Credential fields must be objects.")
             if not all(
                 isinstance(key, str) and isinstance(value, str)
-                for values in (http_headers, git_environment)
+                for values in (http_headers, git_environment, database_parameters)
                 for key, value in values.items()
             ):
                 raise ValueError("Credential fields must be strings.")
-            return CredentialMaterial(
-                http_headers=dict(http_headers),
-                git_environment=dict(git_environment),
+            return validate_credential_material(
+                CredentialMaterial(
+                    http_headers=dict(http_headers),
+                    git_environment=dict(git_environment),
+                    database_parameters=dict(database_parameters),
+                )
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError("Referenced credential is invalid.") from exc
@@ -89,19 +134,5 @@ class DiscoveryResult:
     deleted: tuple[str, ...]
     renamed: tuple[tuple[str, str], ...] = ()
     source_revision: str | None = None
-
-
-class ConnectorError(RuntimeError):
-    pass
-
-
-class TransientConnectorError(ConnectorError):
-    pass
-
-
-class SourceLimitError(ConnectorError):
-    pass
-
-
-class SSRFProtectionError(ConnectorError):
-    pass
+    complete: bool = True
+    incomplete_reasons: tuple[str, ...] = ()

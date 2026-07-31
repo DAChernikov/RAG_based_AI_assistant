@@ -7,7 +7,7 @@ import signal
 from pydantic import ValidationError
 
 from app.api.config import settings
-from app.catalog.repository import CatalogRepository
+from app.catalog.repository import CatalogRepository, LeaseLostError
 from app.connectors.base import EnvironmentCredentialResolver, TransientConnectorError
 from app.connectors.git import GitConnector
 from app.connectors.website import WebsiteConnector
@@ -63,6 +63,22 @@ class IngestionWorker:
             settings.ingestion_lease_sec,
         )
         if claimed is None:
+            exhausted = await asyncio.to_thread(
+                self.repository.fail_exhausted_ingestion,
+                contract.tenant_id,
+                contract.source_id,
+                contract.source_version_id,
+                contract.run_id,
+            )
+            if exhausted:
+                await self._event(contract, "failed", "failed")
+                await self.queue.send_to_dlq(
+                    message_id,
+                    contract,
+                    "retry_exhausted",
+                    "Ingestion failed. See logs using the correlation ID.",
+                )
+                await self.queue.ack(message_id)
             return
         running, lease_token = claimed
         await self._event(contract, "started", "discover")
@@ -72,7 +88,7 @@ class IngestionWorker:
             await self._event(contract, event_type, stage)
 
         try:
-            await self.pipeline.execute(contract, emit)
+            await self.pipeline.execute(contract, emit, lease_token=lease_token)
             completed = await asyncio.to_thread(
                 self.repository.complete_ingestion_job, contract.run_id, lease_token
             )
@@ -99,6 +115,8 @@ class IngestionWorker:
                 await self.queue.ack(message_id)
             else:
                 await self._fail(message_id, contract, lease_token, "retry_exhausted")
+        except LeaseLostError:
+            return
         except Exception:
             await self._fail(message_id, contract, lease_token, "ingestion_failed")
         finally:
@@ -108,7 +126,7 @@ class IngestionWorker:
 
     async def _fail(self, message_id, contract, lease_token, code: str) -> None:
         message = "Ingestion failed. See logs using the correlation ID."
-        await asyncio.to_thread(
+        failed = await asyncio.to_thread(
             self.repository.fail_ingestion,
             contract.tenant_id,
             contract.source_id,
@@ -118,6 +136,8 @@ class IngestionWorker:
             message,
             lease_token,
         )
+        if not failed:
+            return
         await self._event(contract, "failed", "failed")
         await self.queue.send_to_dlq(message_id, contract, code, message)
         await self.queue.ack(message_id)

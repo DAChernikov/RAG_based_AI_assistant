@@ -7,6 +7,7 @@ from app.catalog.configs import (
     WebsiteSourceConfig,
     parse_source_config,
 )
+from app.catalog.jdbc_urls import parse_jdbc_url
 
 
 def test_typed_website_git_and_jdbc_configs():
@@ -145,3 +146,29 @@ def test_website_root_must_be_in_allowed_domains():
                 "allowed_domains": ["example.com"],
             }
         )
+
+
+@pytest.mark.parametrize(
+    "jdbc_url",
+    [
+        "jdbc:postgresql://user@db.example.test/demo?sslmode=verify-full",
+        "jdbc:postgresql://db.example.test/demo?user=blocked",
+        "jdbc:postgresql://db.example.test/demo?p%61ssword=blocked",
+        "jdbc:sqlserver://db.example.test;databaseName=demo;password=blocked",
+        "jdbc:sqlserver://db.example.test;databaseName=demo;access_token=blocked",
+        "jdbc:sqlserver://db.example.test;databaseName=demo;apiKey=blocked",
+        "jdbc:oracle:thin:user/blocked@//db.example.test:1521/demo",
+        "jdbc:oracle:thin:@(DESCRIPTION=(PASSWORD=blocked)(HOST=db.example.test))",
+    ],
+)
+def test_jdbc_url_parser_rejects_credentials_across_vendor_syntaxes(jdbc_url):
+    with pytest.raises(ValueError):
+        parse_jdbc_url(jdbc_url)
+
+
+def test_jdbc_url_parser_extracts_safe_postgresql_endpoint():
+    parsed = parse_jdbc_url("jdbc:postgresql://db.example.test:5432/demo?sslmode=verify-full")
+    assert parsed.host == "db.example.test"
+    assert parsed.port == 5432
+    assert parsed.database == "demo"
+    assert parsed.properties == {"sslmode": "verify-full"}

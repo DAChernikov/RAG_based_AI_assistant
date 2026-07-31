@@ -43,6 +43,10 @@ class IdempotencyConflictError(RuntimeError):
     pass
 
 
+class LeaseLostError(RuntimeError):
+    pass
+
+
 ALLOWED_TRANSITIONS = {
     SourceVersionStatus.DISCOVERED.value: {SourceVersionStatus.INGESTING.value},
     SourceVersionStatus.INGESTING.value: {
@@ -67,6 +71,46 @@ ALLOWED_TRANSITIONS = {
 class CatalogRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
+
+    @staticmethod
+    def _has_valid_lease(
+        run: IngestionRun | None,
+        lease_token: uuid.UUID,
+        version_id: uuid.UUID | None = None,
+    ) -> bool:
+        if (
+            run is None
+            or run.status != IngestionRunStatus.RUNNING.value
+            or run.lease_token != lease_token
+            or run.lease_expires_at is None
+        ):
+            return False
+        expires_at = (
+            run.lease_expires_at.replace(tzinfo=UTC)
+            if run.lease_expires_at.tzinfo is None
+            else run.lease_expires_at
+        )
+        return expires_at > datetime.now(UTC) and (
+            version_id is None or run.source_version_id == version_id
+        )
+
+    @classmethod
+    def _assert_lease(
+        cls,
+        session: Session,
+        run_id: uuid.UUID | None,
+        lease_token: uuid.UUID | None,
+        version_id: uuid.UUID,
+    ) -> None:
+        if run_id is None and lease_token is None:
+            return
+        if run_id is None or lease_token is None:
+            raise LeaseLostError("A complete ingestion lease fence is required.")
+        run = session.scalar(
+            select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
+        )
+        if not cls._has_valid_lease(run, lease_token, version_id):
+            raise LeaseLostError("Ingestion lease is no longer valid.")
 
     def list_knowledge_bases(self, tenant_id: uuid.UUID) -> list[KnowledgeBase]:
         with self.session_factory() as session:
@@ -348,8 +392,11 @@ class CatalogRepository:
         target_status: str,
         *,
         failure_code: str | None = None,
+        run_id: uuid.UUID | None = None,
+        lease_token: uuid.UUID | None = None,
     ) -> SourceVersion:
         with self.session_factory.begin() as session:
+            self._assert_lease(session, run_id, lease_token, version_id)
             version = session.scalar(
                 select(SourceVersion)
                 .where(
@@ -415,8 +462,12 @@ class CatalogRepository:
         tenant_id: uuid.UUID,
         source_id: uuid.UUID,
         version_id: uuid.UUID,
+        *,
+        run_id: uuid.UUID | None = None,
+        lease_token: uuid.UUID | None = None,
     ) -> SourceVersion:
         with self.session_factory.begin() as session:
+            self._assert_lease(session, run_id, lease_token, version_id)
             source = session.scalar(
                 select(KnowledgeSource)
                 .where(
@@ -611,6 +662,74 @@ class CatalogRepository:
             run.lease_expires_at = now + timedelta(seconds=lease_seconds)
             return run, lease_token
 
+    def fail_exhausted_ingestion(
+        self,
+        tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        version_id: uuid.UUID,
+        run_id: uuid.UUID,
+        error_code: str = "retry_exhausted",
+        error_message: str = "Ingestion failed. See logs using the correlation ID.",
+    ) -> bool:
+        now = datetime.now(UTC)
+        with self.session_factory.begin() as session:
+            run = session.scalar(
+                select(IngestionRun)
+                .where(
+                    IngestionRun.id == run_id,
+                    IngestionRun.tenant_id == tenant_id,
+                    IngestionRun.source_id == source_id,
+                    IngestionRun.source_version_id == version_id,
+                )
+                .with_for_update()
+            )
+            if (
+                run is None
+                or run.status
+                in {
+                    IngestionRunStatus.COMPLETED.value,
+                    IngestionRunStatus.FAILED.value,
+                    IngestionRunStatus.CANCELLED.value,
+                }
+                or run.attempt_count < run.max_attempts
+            ):
+                return False
+            if run.status == IngestionRunStatus.RUNNING.value:
+                if run.lease_expires_at is None:
+                    return False
+                expires_at = (
+                    run.lease_expires_at.replace(tzinfo=UTC)
+                    if run.lease_expires_at.tzinfo is None
+                    else run.lease_expires_at
+                )
+                if expires_at > now:
+                    return False
+            version = session.scalar(
+                select(SourceVersion)
+                .where(
+                    SourceVersion.id == version_id,
+                    SourceVersion.source_id == source_id,
+                    SourceVersion.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            run.status = IngestionRunStatus.FAILED.value
+            run.completed_at = now
+            run.error_code = error_code[:100]
+            run.error_message = error_message[:500]
+            run.lease_owner = None
+            run.lease_token = None
+            run.lease_expires_at = None
+            if version is not None and version.status not in {
+                SourceVersionStatus.ACTIVE.value,
+                SourceVersionStatus.SUPERSEDED.value,
+            }:
+                version.status = SourceVersionStatus.FAILED.value
+                version.failed_at = now
+                version.failure_code = error_code[:100]
+                version.failure_message = error_message[:500]
+            return True
+
     def renew_ingestion_lease(
         self, run_id: uuid.UUID, lease_token: uuid.UUID, lease_seconds: int
     ) -> bool:
@@ -618,11 +737,7 @@ class CatalogRepository:
             run = session.scalar(
                 select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
             )
-            if (
-                run is None
-                or run.status != IngestionRunStatus.RUNNING.value
-                or run.lease_token != lease_token
-            ):
+            if not self._has_valid_lease(run, lease_token):
                 return False
             run.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
             return True
@@ -634,12 +749,7 @@ class CatalogRepository:
             run = session.scalar(
                 select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
             )
-            if (
-                run is None
-                or run.status != IngestionRunStatus.RUNNING.value
-                or run.lease_token != lease_token
-                or run.attempt_count >= run.max_attempts
-            ):
+            if not self._has_valid_lease(run, lease_token) or run.attempt_count >= run.max_attempts:
                 return False
             run.status = IngestionRunStatus.QUEUED.value
             run.error_code = error_code[:100]
@@ -689,11 +799,7 @@ class CatalogRepository:
             run = session.scalar(
                 select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
             )
-            if (
-                run is None
-                or run.status != IngestionRunStatus.RUNNING.value
-                or run.lease_token != lease_token
-            ):
+            if not self._has_valid_lease(run, lease_token):
                 return False
             run.status = IngestionRunStatus.COMPLETED.value
             run.completed_at = datetime.now(UTC)
@@ -707,11 +813,7 @@ class CatalogRepository:
             run = session.scalar(
                 select(IngestionRun).where(IngestionRun.id == run_id).with_for_update()
             )
-            if (
-                run is None
-                or run.status != IngestionRunStatus.RUNNING.value
-                or run.lease_token != lease_token
-            ):
+            if not self._has_valid_lease(run, lease_token):
                 return False
             run.status = IngestionRunStatus.CANCELLED.value
             run.completed_at = datetime.now(UTC)
@@ -800,8 +902,12 @@ class CatalogRepository:
         previous_version_id: uuid.UUID | None,
         manifest: dict,
         content_checksum: str,
+        *,
+        run_id: uuid.UUID | None = None,
+        lease_token: uuid.UUID | None = None,
     ) -> None:
         with self.session_factory.begin() as session:
+            self._assert_lease(session, run_id, lease_token, version_id)
             version = session.scalar(
                 select(SourceVersion)
                 .where(
@@ -976,17 +1082,8 @@ class CatalogRepository:
         error_code: str,
         error_message: str,
         lease_token: uuid.UUID | None = None,
-    ) -> None:
+    ) -> bool:
         with self.session_factory.begin() as session:
-            version = session.scalar(
-                select(SourceVersion)
-                .where(
-                    SourceVersion.id == version_id,
-                    SourceVersion.source_id == source_id,
-                    SourceVersion.tenant_id == tenant_id,
-                )
-                .with_for_update()
-            )
             run = session.scalar(
                 select(IngestionRun)
                 .where(
@@ -996,8 +1093,17 @@ class CatalogRepository:
                 )
                 .with_for_update()
             )
-            if lease_token is not None and (run is None or run.lease_token != lease_token):
-                return
+            if lease_token is not None and not self._has_valid_lease(run, lease_token, version_id):
+                return False
+            version = session.scalar(
+                select(SourceVersion)
+                .where(
+                    SourceVersion.id == version_id,
+                    SourceVersion.source_id == source_id,
+                    SourceVersion.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
             if version is not None and version.status not in {
                 SourceVersionStatus.ACTIVE.value,
                 SourceVersionStatus.SUPERSEDED.value,
@@ -1014,5 +1120,4 @@ class CatalogRepository:
                 run.lease_owner = None
                 run.lease_token = None
                 run.lease_expires_at = None
-
-    NormalizedDocument,
+            return version is not None or run is not None

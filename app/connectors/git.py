@@ -5,6 +5,7 @@ import fnmatch
 import hashlib
 import os
 import re
+import shlex
 import tempfile
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from app.connectors.base import (
     PreviousObject,
     SourceLimitError,
     TransientConnectorError,
+    validate_credential_material,
 )
 from app.connectors.parsing import parse_code
 
@@ -69,6 +71,8 @@ class GitConnector:
             "filter.lfs.smudge=",
             "-c",
             "filter.lfs.required=false",
+            "-c",
+            "http.followRedirects=false",
             *args,
             cwd=cwd,
             env=env,
@@ -100,6 +104,82 @@ class GitConnector:
             return False
         return not any(fnmatch.fnmatch(path, pattern) for pattern in config.exclude_patterns)
 
+    @staticmethod
+    def _isolated_environment(
+        root: Path, credentials: CredentialMaterial, repository_url: str
+    ) -> dict[str, str]:
+        home = root / "home"
+        home.mkdir(mode=0o700)
+        environment = {
+            key: value
+            for key in ("PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR")
+            if (value := os.environ.get(key))
+        }
+        environment.update(
+            {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_LFS_SKIP_SMUDGE": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
+        git_credentials = credentials.git_environment
+        username = git_credentials.get("GIT_USERNAME")
+        password = git_credentials.get("GIT_PASSWORD")
+        if bool(username) != bool(password):
+            raise RuntimeError("Git username and password must be configured together.")
+        if username and password:
+            askpass = root / "git-askpass.sh"
+            askpass.write_text(
+                "#!/bin/sh\n"
+                'case "$1" in *Username*) printf "%s" "$GIT_USERNAME" ;; '
+                '*) printf "%s" "$GIT_PASSWORD" ;; esac\n'
+            )
+            askpass.chmod(0o700)
+            environment.update(
+                {
+                    "GIT_ASKPASS": str(askpass),
+                    "GIT_USERNAME": username,
+                    "GIT_PASSWORD": password,
+                }
+            )
+
+        is_ssh = repository_url.startswith("ssh://") or repository_url.startswith("git@")
+        if is_ssh:
+            known_hosts = git_credentials.get("SSH_KNOWN_HOSTS")
+            if not known_hosts:
+                raise RuntimeError("SSH Git sources require pinned known_hosts material.")
+            ssh_dir = root / "ssh"
+            ssh_dir.mkdir(mode=0o700)
+            known_hosts_path = ssh_dir / "known_hosts"
+            known_hosts_path.write_text(known_hosts)
+            known_hosts_path.chmod(0o600)
+            command = [
+                "ssh",
+                "-F",
+                "/dev/null",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"UserKnownHostsFile={known_hosts_path}",
+                "-o",
+                "GlobalKnownHostsFile=/dev/null",
+            ]
+            private_key = git_credentials.get("SSH_PRIVATE_KEY")
+            if private_key:
+                key_path = ssh_dir / "identity"
+                key_path.write_text(private_key)
+                key_path.chmod(0o600)
+                command.extend(["-i", str(key_path)])
+            if socket_path := git_credentials.get("SSH_AUTH_SOCK"):
+                environment["SSH_AUTH_SOCK"] = socket_path
+            environment["GIT_SSH_COMMAND"] = " ".join(map(shlex.quote, command))
+        return environment
+
     async def discover(
         self,
         config: GitSourceConfig,
@@ -108,22 +188,14 @@ class GitConnector:
         previous_revision: str | None = None,
     ) -> DiscoveryResult:
         previous = previous or {}
-        credentials = (
+        credentials = validate_credential_material(
             await self.credential_resolver.resolve(config.credential_ref)
             if config.credential_ref
             else CredentialMaterial()
         )
-        environment = os.environ.copy()
-        environment.update(credentials.git_environment)
-        environment.update(
-            {
-                "GIT_LFS_SKIP_SMUDGE": "1",
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_CONFIG_NOSYSTEM": "1",
-            }
-        )
         with tempfile.TemporaryDirectory(prefix="rag-git-") as temporary:
             root = Path(temporary)
+            environment = self._isolated_environment(root, credentials, config.repository_url)
             await self._git(root, environment, "init", "--quiet", "repository")
             repository = root / "repository"
             await self._git(

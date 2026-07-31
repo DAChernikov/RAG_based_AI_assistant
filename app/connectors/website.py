@@ -7,6 +7,7 @@ import ipaddress
 import socket
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Awaitable, Callable
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
@@ -25,11 +26,29 @@ from app.connectors.base import (
     SourceLimitError,
     SSRFProtectionError,
     TransientConnectorError,
+    validate_credential_material,
 )
 from app.connectors.parsing import checksum_text
 
-_TEXT_TAGS = {"p", "li", "pre", "code", "td", "th", "blockquote"}
+_BLOCK_TAGS = {
+    "p",
+    "li",
+    "pre",
+    "code",
+    "td",
+    "th",
+    "tr",
+    "blockquote",
+    *(f"h{i}" for i in range(1, 7)),
+}
 _BINARY_CONTENT_PREFIXES = ("image/", "audio/", "video/", "application/octet-stream")
+
+
+@dataclass
+class _OpenElement:
+    tag: str
+    parts: list[str] = field(default_factory=list)
+    cells: list[dict[str, str | int]] = field(default_factory=list)
 
 
 class _HTMLExtractor(HTMLParser):
@@ -39,12 +58,14 @@ class _HTMLExtractor(HTMLParser):
         self.links: list[str] = []
         self.canonical: str | None = None
         self.metadata: dict[str, str] = {}
-        self.blocks: list[tuple[str, str, tuple[str, ...]]] = []
+        self.blocks: list[dict] = []
         self.headings: list[str] = []
-        self._tag: str | None = None
-        self._buffer: list[str] = []
+        self._elements: list[_OpenElement] = []
+        self._tag_stack: list[str] = []
+        self._ignored_depth = 0
 
     def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
         attributes = dict(attrs)
         if tag == "a" and attributes.get("href"):
             self.links.append(attributes["href"])
@@ -54,30 +75,74 @@ class _HTMLExtractor(HTMLParser):
             key = attributes.get("name") or attributes.get("property")
             if key and attributes.get("content"):
                 self.metadata[key[:100]] = attributes["content"][:1000]
-        if tag == "title" or tag in _TEXT_TAGS or tag in {f"h{i}" for i in range(1, 7)}:
-            self._tag = tag
-            self._buffer = []
+        self._tag_stack.append(tag)
+        if tag in {"script", "style", "noscript"}:
+            self._ignored_depth += 1
+        if tag == "title" or tag in _BLOCK_TAGS:
+            self._elements.append(_OpenElement(tag=tag))
 
     def handle_data(self, data):
-        if self._tag:
-            self._buffer.append(data)
+        if self._ignored_depth:
+            return
+        for element in self._elements:
+            element.parts.append(data)
 
     def handle_endtag(self, tag):
-        if tag != self._tag:
+        tag = tag.lower()
+        matching = next(
+            (
+                index
+                for index in range(len(self._elements) - 1, -1, -1)
+                if self._elements[index].tag == tag
+            ),
+            None,
+        )
+        if matching is not None:
+            while len(self._elements) > matching:
+                self._finish(self._elements.pop())
+        if tag in {"script", "style", "noscript"} and self._ignored_depth:
+            self._ignored_depth -= 1
+        if tag in self._tag_stack:
+            reverse_index = self._tag_stack[::-1].index(tag)
+            del self._tag_stack[len(self._tag_stack) - reverse_index - 1 :]
+
+    def close(self):
+        while self._elements:
+            self._finish(self._elements.pop())
+        super().close()
+
+    def _finish(self, element: _OpenElement) -> None:
+        raw = "".join(element.parts)
+        text = raw.strip() if element.tag in {"pre", "code"} else " ".join(raw.split())
+        if not text:
             return
-        text = " ".join("".join(self._buffer).split())
-        if text:
-            if tag == "title":
-                self.title = text
-            elif tag.startswith("h") and len(tag) == 2:
-                level = int(tag[1])
-                self.headings = self.headings[: level - 1]
-                self.headings.append(text)
-                self.blocks.append((tag, text, tuple(self.headings)))
-            else:
-                self.blocks.append((tag, text, tuple(self.headings)))
-        self._tag = None
-        self._buffer = []
+        if element.tag == "title":
+            self.title = text
+            return
+        if element.tag.startswith("h") and len(element.tag) == 2:
+            level = int(element.tag[1])
+            self.headings = self.headings[: level - 1]
+            self.headings.append(text)
+        metadata: dict[str, object] = {}
+        if element.tag in {"td", "th"}:
+            row = next((item for item in reversed(self._elements) if item.tag == "tr"), None)
+            if row is not None:
+                row.cells.append({"kind": element.tag, "text": text, "column": len(row.cells)})
+            metadata["column"] = len(row.cells) - 1 if row is not None else 0
+        if element.tag == "tr":
+            metadata["cells"] = list(element.cells)
+            if element.cells:
+                text = " | ".join(str(cell["text"]) for cell in element.cells)
+        if element.tag == "li":
+            metadata["list_depth"] = sum(item in {"ul", "ol"} for item in self._tag_stack)
+        self.blocks.append(
+            {
+                "element": element.tag,
+                "text": text,
+                "headings": tuple(self.headings),
+                "metadata": metadata,
+            }
+        )
 
 
 async def _resolve_public(host: str) -> None:
@@ -113,6 +178,14 @@ class WebsiteConnector:
         return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, ""))
 
     @staticmethod
+    def _origin(value: str) -> str:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        default_port = 443 if parsed.scheme == "https" else 80
+        port = f":{parsed.port}" if parsed.port and parsed.port != default_port else ""
+        return f"{parsed.scheme.lower()}://{host}{port}"
+
+    @staticmethod
     def _allowed(url: str, config: WebsiteSourceConfig) -> bool:
         parsed = urlsplit(url)
         host = (parsed.hostname or "").lower().rstrip(".")
@@ -134,7 +207,9 @@ class WebsiteConnector:
         client: httpx.AsyncClient,
         url: str,
         config: WebsiteSourceConfig,
-        headers: dict[str, str],
+        request_headers: dict[str, str],
+        credential_headers: dict[str, str],
+        credential_origins: frozenset[str],
     ) -> httpx.Response:
         current = self._normalize_url(url)
         for _redirect in range(6):
@@ -148,6 +223,9 @@ class WebsiteConnector:
             response = None
             for attempt in range(config.max_retries + 1):
                 try:
+                    headers = dict(request_headers)
+                    if self._origin(current) in credential_origins:
+                        headers.update(credential_headers)
                     response = await client.get(current, headers=headers)
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     if attempt >= config.max_retries:
@@ -183,10 +261,15 @@ class WebsiteConnector:
         previous: dict[str, PreviousObject] | None = None,
     ) -> DiscoveryResult:
         previous = previous or {}
-        credentials = (
+        credentials = validate_credential_material(
             await self.credential_resolver.resolve(config.credential_ref)
             if config.credential_ref
             else CredentialMaterial()
+        )
+        credential_origins = frozenset(
+            {self._origin(str(config.root_url)), *config.credential_allowed_origins}
+            if config.credential_ref
+            else set()
         )
         queue: deque[tuple[str, int, bool]] = deque(
             [(self._normalize_url(str(config.root_url)), 0, False)]
@@ -199,31 +282,46 @@ class WebsiteConnector:
         confirmed: set[str] = set()
         documents: list[ConnectorDocument] = []
         started_at = time.monotonic()
+        complete = True
+        incomplete_reasons: set[str] = set()
         async with httpx.AsyncClient(
             transport=self.transport,
             timeout=config.request_timeout_sec,
             follow_redirects=False,
         ) as client:
-            while queue and len(visited) < config.max_pages:
+            while queue:
+                if len(visited) >= config.max_pages:
+                    complete = False
+                    incomplete_reasons.add("max_pages")
+                    break
                 if time.monotonic() - started_at > config.max_crawl_seconds:
-                    raise SourceLimitError("Website crawl time limit exceeded.")
+                    complete = False
+                    incomplete_reasons.add("max_crawl_seconds")
+                    break
                 url, depth, is_sitemap = queue.popleft()
                 url = self._normalize_url(url)
-                if (
-                    url in visited
-                    or depth > config.max_depth
-                    or (not is_sitemap and not self._allowed(url, config))
-                ):
+                if url in visited or (not is_sitemap and not self._allowed(url, config)):
+                    continue
+                if depth > config.max_depth:
+                    complete = False
+                    incomplete_reasons.add("max_depth")
                     continue
                 visited.add(url)
                 old = previous.get(url)
-                headers = dict(credentials.http_headers)
+                headers = {}
                 if old:
                     if old.metadata.get("etag"):
                         headers["If-None-Match"] = old.metadata["etag"]
                     if old.metadata.get("last_modified"):
                         headers["If-Modified-Since"] = old.metadata["last_modified"]
-                response = await self._request(client, url, config, headers)
+                response = await self._request(
+                    client,
+                    url,
+                    config,
+                    headers,
+                    credentials.http_headers,
+                    credential_origins,
+                )
                 if response.status_code == 304 and old:
                     confirmed.add(old.object_key)
                     continue
@@ -251,17 +349,23 @@ class WebsiteConnector:
                     continue
                 extractor = _HTMLExtractor()
                 extractor.feed(response.text)
+                extractor.close()
                 canonical = self._normalize_url(urljoin(url, extractor.canonical or url))
                 if not self._allowed(canonical, config):
                     canonical = url
                 chunks = tuple(
                     ParsedChunk(
-                        text=text,
+                        text=block["text"],
                         checksum=checksum_text(text),
                         chunk_index=index,
-                        metadata={"element": tag, "headings": list(headings)},
+                        metadata={
+                            "element": block["element"],
+                            "headings": list(block["headings"]),
+                            **block["metadata"],
+                        },
                     )
-                    for index, (tag, text, headings) in enumerate(extractor.blocks)
+                    for index, block in enumerate(extractor.blocks)
+                    for text in [block["text"]]
                 )
                 text = "\n\n".join(chunk.text for chunk in chunks)
                 checksum = hashlib.sha256(body).hexdigest()
@@ -278,9 +382,9 @@ class WebsiteConnector:
                             "last_modified": response.headers.get("last-modified"),
                             "html_metadata": extractor.metadata,
                             "headings": [
-                                list(item[2])
+                                list(item["headings"])
                                 for item in extractor.blocks
-                                if item[0].startswith("h")
+                                if item["element"].startswith("h")
                             ],
                         },
                         chunks=chunks,
@@ -302,11 +406,17 @@ class WebsiteConnector:
         )
         added = tuple(sorted(set(by_key) - set(previous)))
         modified = tuple(sorted(key for key in by_key if key in previous and key not in unchanged))
-        deleted = tuple(sorted(set(previous) - confirmed - set(by_key)))
+        if complete:
+            deleted = tuple(sorted(set(previous) - confirmed - set(by_key)))
+        else:
+            deleted = ()
+            unchanged.update(set(previous) - set(by_key))
         return DiscoveryResult(
             documents=tuple(by_key[key] for key in sorted(by_key)),
             added=added,
             modified=modified,
             unchanged=tuple(sorted(unchanged)),
             deleted=deleted,
+            complete=complete,
+            incomplete_reasons=tuple(sorted(incomplete_reasons)),
         )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Annotated, Any, Literal
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 from pydantic import (
     AnyHttpUrl,
@@ -13,6 +13,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from app.catalog.jdbc_urls import parse_jdbc_url
 
 _CREDENTIAL_REF = re.compile(
     r"^(?:cred|credential|vault|secretref|connection):[A-Za-z0-9_.:/-]{1,240}$"
@@ -84,6 +86,7 @@ class WebsiteSourceConfig(SourceConfigBase):
     requests_per_second: float = Field(default=2.0, gt=0, le=100)
     max_retries: int = Field(default=3, ge=0, le=10)
     use_sitemap: bool = True
+    credential_allowed_origins: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("allowed_domains")
     @classmethod
@@ -110,6 +113,32 @@ class WebsiteSourceConfig(SourceConfigBase):
             host == domain or host.endswith(f".{domain}") for domain in self.allowed_domains
         ):
             raise ValueError("root_url host must be covered by allowed_domains.")
+        if self.credential_ref and self.root_url.scheme != "https":
+            raise ValueError("Authenticated Website sources must use HTTPS.")
+        normalized_origins = []
+        for raw in self.credential_allowed_origins:
+            parsed = urlsplit(raw.strip())
+            origin_host = (parsed.hostname or "").lower().rstrip(".")
+            if (
+                parsed.scheme != "https"
+                or not origin_host
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+                or not any(
+                    origin_host == domain or origin_host.endswith(f".{domain}")
+                    for domain in self.allowed_domains
+                )
+            ):
+                raise ValueError(
+                    "credential_allowed_origins must contain allowed HTTPS origins only."
+                )
+            normalized_origins.append(
+                f"https://{origin_host}{f':{parsed.port}' if parsed.port else ''}"
+            )
+        self.credential_allowed_origins = sorted(set(normalized_origins))
         return self
 
 
@@ -176,14 +205,7 @@ class JDBCSourceConfig(SourceConfigBase):
         if value is None:
             return None
         raw = value.strip()
-        if not raw.lower().startswith("jdbc:"):
-            raise ValueError("jdbc_url must start with jdbc:.")
-        parsed = urlsplit(raw[5:])
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("jdbc_url must not contain embedded credentials.")
-        sensitive_query_keys = {key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
-        if any(_is_secret_key(key) for key in sensitive_query_keys):
-            raise ValueError("jdbc_url must not contain credential query parameters.")
+        parse_jdbc_url(raw)
         return raw
 
 
