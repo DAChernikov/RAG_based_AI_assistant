@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 
 from app.api.config import settings
-from app.api.routes import admin, api_keys, ask, auth, health, jobs, users
+from app.api.routes import admin, api_keys, ask, auth, catalog, health, jobs, users
 from app.api.services.artifact_manager import ArtifactManager
 from app.api.services.llm_service import LLMService
 
@@ -38,6 +38,9 @@ async def lifespan(app: FastAPI):
         "queued_application": None,
         "auth_repository": None,
         "auth_service": None,
+        "auth_redis": None,
+        "catalog_repository": None,
+        "catalog_service": None,
         "startup_error": None,
     }
 
@@ -51,13 +54,32 @@ async def lifespan(app: FastAPI):
         sync_repository = ApplicationRepository(session_factory)
         repository = AsyncApplicationRepository(sync_repository)
         auth_repository = AuthRepository(session_factory)
+        from app.catalog.repository import CatalogRepository
+        from app.catalog.service import CatalogService
+
+        catalog_repository = CatalogRepository(session_factory)
         runtime["database_engine"] = engine
         runtime["repository"] = repository
         runtime["auth_repository"] = auth_repository
+        runtime["catalog_repository"] = catalog_repository
+        runtime["catalog_service"] = CatalogService(catalog_repository)
         if not settings.auth_disabled:
+            from redis.asyncio import Redis
+
+            from app.auth.rate_limit import RedisLoginRateLimiter
             from app.auth.service import AuthService
 
-            runtime["auth_service"] = AuthService(auth_repository)
+            auth_redis = Redis.from_url(settings.redis_url, decode_responses=True)
+            runtime["auth_redis"] = auth_redis
+            runtime["auth_service"] = AuthService(
+                auth_repository,
+                RedisLoginRateLimiter(
+                    auth_redis,
+                    settings.login_rate_limit_attempts,
+                    settings.login_rate_limit_window_sec,
+                    settings.login_rate_limit_prefix,
+                ),
+            )
 
         if mode == "direct":
             from app.api.services.rag_service import RAGService
@@ -98,6 +120,9 @@ async def lifespan(app: FastAPI):
         queue = runtime.get("queue")
         if queue is not None:
             await queue.close()
+        auth_redis = runtime.get("auth_redis")
+        if auth_redis is not None:
+            await auth_redis.aclose()
         engine = runtime.get("database_engine")
         if engine is not None:
             engine.dispose()
@@ -105,7 +130,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RAG Based AI Assistant API",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -129,4 +154,5 @@ app.include_router(ask.router)
 app.include_router(jobs.router)
 app.include_router(api_keys.router)
 app.include_router(users.router)
+app.include_router(catalog.router)
 app.include_router(admin.router)

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
-from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 
 from app.api.config import settings
@@ -22,27 +20,8 @@ from app.state.auth_repository import AuthRepository
 ALL_INFERENCE_SCOPES = frozenset({"profile:read", "inference:read", "inference:write"})
 
 
-class LoginRateLimiter:
-    def __init__(self, attempts: int, window_seconds: int):
-        self.attempts = attempts
-        self.window_seconds = window_seconds
-        self.history: dict[str, deque[float]] = defaultdict(deque)
-
-    def check(self, key: str) -> None:
-        now = time.monotonic()
-        bucket = self.history[key]
-        while bucket and bucket[0] <= now - self.window_seconds:
-            bucket.popleft()
-        if len(bucket) >= self.attempts:
-            raise AuthenticationError("Too many login attempts. Try again later.")
-        bucket.append(now)
-
-    def reset(self, key: str) -> None:
-        self.history.pop(key, None)
-
-
 class AuthService:
-    def __init__(self, repository: AuthRepository):
+    def __init__(self, repository: AuthRepository, rate_limiter):
         self.repository = repository
         self.passwords = PasswordManager()
         self.jwt = JWTManager(
@@ -51,10 +30,7 @@ class AuthService:
             settings.jwt_audience,
             settings.access_token_ttl_sec,
         )
-        self.rate_limiter = LoginRateLimiter(
-            settings.login_rate_limit_attempts,
-            settings.login_rate_limit_window_sec,
-        )
+        self.rate_limiter = rate_limiter
 
     async def _call(self, method, *args, **kwargs):
         return await asyncio.to_thread(method, *args, **kwargs)
@@ -73,7 +49,7 @@ class AuthService:
         self, tenant_slug: str, username: str, password: str, correlation_id: uuid.UUID
     ) -> dict:
         rate_key = f"{tenant_slug}:{username}"
-        self.rate_limiter.check(rate_key)
+        await self.rate_limiter.check(rate_key)
         user = await self._call(self.repository.find_user_for_login, tenant_slug, username)
         if (
             user is None
@@ -90,7 +66,7 @@ class AuthService:
                 correlation_id=correlation_id,
             )
             raise AuthenticationError("Invalid credentials.")
-        self.rate_limiter.reset(rate_key)
+        await self.rate_limiter.reset(rate_key)
         await self._call(self.repository.mark_login, user.id)
         principal = self.principal_for_user(user)
         result = await self._issue_session(principal, user.id)

@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     api_key_default_ttl_sec: int = 7_776_000
     login_rate_limit_attempts: int = 5
     login_rate_limit_window_sec: int = 60
+    login_rate_limit_prefix: str = "rag:auth:login"
     worker_lease_sec: int = 300
 
     stream_edit_interval_sec: float = 1.0
