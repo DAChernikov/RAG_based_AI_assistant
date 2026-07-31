@@ -23,5 +23,5 @@ and a Web UI are added. A hosted identity provider would conflict with that depl
 ## Consequences
 
 Deployments configure a secret of at least 32 characters and bootstrap the first administrator
-locally. Asymmetric signing and signing-key rotation remain future hardening. The login limiter
-is process-local and must move to shared storage before horizontally scaling the API.
+locally. Asymmetric signing and signing-key rotation remain future hardening. Iteration 4 moved
+login throttling to an atomic Redis-backed limiter shared by API processes.

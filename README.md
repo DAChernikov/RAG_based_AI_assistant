@@ -14,6 +14,10 @@ self-hosted OpenAI-compatible HTTP API. Коммерческие внешние 
 реализованы в Iteration 3. Web UI, source connectors, pgvector и multi-label retrieval пока
 не реализованы.
 
+Iteration 4 добавляет tenant-scoped каталог knowledge bases и источников, typed Website/Git/JDBC
+configs и immutable source versions с atomic activation/rollback. Реальные crawl/clone/JDBC,
+parsing, embeddings и scheduler пока не реализованы.
+
 ## Реализованная runtime-схема
 
 ```text
@@ -105,6 +109,16 @@ Authentication and administration:
 - `GET|POST /v1/api-keys`;
 - `DELETE /v1/api-keys/{key_id}`.
 
+Admin knowledge catalog:
+
+- `GET|POST /v1/admin/knowledge-bases`;
+- `GET|PATCH|DELETE /v1/admin/knowledge-bases/{id}`;
+- `GET|POST /v1/admin/knowledge-sources`;
+- `GET|PATCH|DELETE /v1/admin/knowledge-sources/{id}`;
+- knowledge base/source linking;
+- version and ingestion-run inspection;
+- version activation and rollback.
+
 `/health` and sanitized `/ready` remain public. `/admin/runtime` is admin-only. Jobs,
 conversations and SSE streams are filtered by authenticated tenant and user. Telegram and
 external clients use `X-API-Key`; its full value is displayed only once.
@@ -138,6 +152,17 @@ make seed-dev
 Миграции не запускаются при import или API startup. Compatibility identity разрешена только
 при явном `AUTH_DISABLED=true` в `APP_ENV=dev|test`; production configuration fails closed.
 API не принимает доверенные `tenant_id`/`user_id` из request body.
+
+Source versions follow:
+
+```text
+discovered -> ingesting -> staged -> validating -> ready -> active -> superseded
+                         \-> failed    \---------> failed
+```
+
+Manifest and source objects become immutable after `staged`. Activation locks the source and
+atomically supersedes the previous active version. A database constraint allows only one
+active version per source.
 
 ## MacBook Air 24 GB profile
 
@@ -211,6 +236,7 @@ models и training opt-in; `RUN_TRAINING = False` по умолчанию. Ре�
 | `REFRESH_TOKEN_TTL_SEC` | lifetime rotating opaque refresh token |
 | `API_KEY_DEFAULT_TTL_SEC` | default lifetime API key |
 | `API_KEY` | Telegram credential для заголовка `X-API-Key` |
+| `LOGIN_RATE_LIMIT_PREFIX` | Redis key namespace for shared login throttling |
 
 Остальные defaults и safe placeholders находятся в `.env.example`. Secrets не должны
 попадать в Git, docs, logs или Redis contracts.
@@ -229,4 +255,6 @@ make smoke-test
 docker compose config --quiet
 ```
 
-Подробное ручное тестирование: [Iteration 03 manual guide](docs/testing/iteration-03-manual.md).
+Backend-итерации до появления Web UI закрываются автоматическими и integration tests без
+обязательного ручного продуктового тестирования владельцем. API catalog contract:
+[Knowledge source catalog](docs/api/knowledge-catalog.md).

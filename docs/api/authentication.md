@@ -32,6 +32,9 @@ The create response is the only response containing the full key. Clients send i
 Stored records contain only SHA-256 hash, safe prefix, scopes, expiry, last-use and revocation
 timestamps. API keys cannot be used to create or manage other keys.
 
+Login throttling uses an atomic Redis counter shared by API processes. Redis keys contain a
+hash of the tenant/username identity rather than the plaintext username.
+
 ## Public and protected paths
 
 `/health` and sanitized `/ready` are public. `/admin/runtime` is admin-only. `/ask`,
