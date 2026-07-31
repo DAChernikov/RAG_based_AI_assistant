@@ -4,9 +4,15 @@ import hashlib
 import json
 import uuid
 
-from app.catalog.configs import GitSourceConfig, WebsiteSourceConfig, parse_source_config
+from app.catalog.configs import (
+    GitSourceConfig,
+    JDBCSourceConfig,
+    WebsiteSourceConfig,
+    parse_source_config,
+)
 from app.catalog.repository import CatalogRepository
 from app.connectors.git import GitConnector
+from app.connectors.jdbc import JDBCMetadataConnector
 from app.connectors.website import WebsiteConnector
 from app.state.models import SourceVersionStatus
 
@@ -25,10 +31,12 @@ class IngestionPipeline:
         repository: CatalogRepository,
         website_connector: WebsiteConnector,
         git_connector: GitConnector,
+        jdbc_connector: JDBCMetadataConnector | None = None,
     ):
         self.repository = repository
         self.website_connector = website_connector
         self.git_connector = git_connector
+        self.jdbc_connector = jdbc_connector
 
     async def execute(self, contract, emit, *, lease_token: uuid.UUID | None = None) -> None:
         run = await self._call(
@@ -72,8 +80,10 @@ class IngestionPipeline:
                 discovery = await self.git_connector.discover(
                     config, previous, previous_revision=previous_revision
                 )
+            elif isinstance(config, JDBCSourceConfig) and self.jdbc_connector is not None:
+                discovery = await self.jdbc_connector.discover(config, previous)
             else:
-                raise UnsupportedConnectorError("JDBC ingestion is not implemented.")
+                raise UnsupportedConnectorError("Source connector is not configured.")
             if await self._cancelled(contract.run_id):
                 raise IngestionCancelled()
             await emit("progress", "incremental_diff")

@@ -8,7 +8,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from psycopg import sql
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 pytestmark = pytest.mark.integration
@@ -43,7 +43,13 @@ def test_catalog_migration_upgrade_downgrade_upgrade():
             "content_blobs",
             "normalized_documents",
             "document_chunks",
+            "jdbc_driver_registry",
         }.issubset(inspect(engine).get_table_names())
+        with engine.connect() as connection:
+            driver = connection.execute(
+                text("SELECT driver_id, registry_version, adapter FROM jdbc_driver_registry")
+            ).one()
+            assert driver == ("postgresql", "1", "psycopg")
         engine.dispose()
 
         command.downgrade(config, "20260731_02")

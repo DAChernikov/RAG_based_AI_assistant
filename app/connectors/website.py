@@ -18,6 +18,7 @@ import httpx
 from app.catalog.configs import WebsiteSourceConfig
 from app.connectors.base import (
     ConnectorDocument,
+    CredentialIsolationError,
     CredentialMaterial,
     CredentialResolver,
     DiscoveryResult,
@@ -266,6 +267,10 @@ class WebsiteConnector:
             if config.credential_ref
             else CredentialMaterial()
         )
+        if credentials.git_environment or credentials.database_parameters:
+            raise CredentialIsolationError(
+                "Website credential reference contains non-HTTP credential material."
+            )
         credential_origins = frozenset(
             {self._origin(str(config.root_url)), *config.credential_allowed_origins}
             if config.credential_ref

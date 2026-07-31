@@ -36,12 +36,14 @@ def test_typed_website_git_and_jdbc_configs():
     jdbc = parse_source_config(
         {
             "source_type": "jdbc",
-            "driver_id": "postgresql-42.7",
+            "driver_id": "postgresql",
             "connection_ref": "connection:neon-demo",
-            "jdbc_url": "jdbc:postgresql://db.example.com/demo?sslmode=require",
+            "jdbc_url": "jdbc:postgresql://db.example.com/demo?sslmode=verify-full",
+            "host_allowlist": ["db.example.com"],
+            "database_allowlist": ["demo"],
+            "catalog_allowlist": ["demo"],
             "schema_allowlist": ["rag_demo_source"],
             "metadata_policy": {"include_indexes": False},
-            "credential_ref": "cred:jdbc/neon-demo",
         }
     )
 
@@ -159,6 +161,7 @@ def test_website_root_must_be_in_allowed_domains():
         "jdbc:sqlserver://db.example.test;databaseName=demo;apiKey=blocked",
         "jdbc:oracle:thin:user/blocked@//db.example.test:1521/demo",
         "jdbc:oracle:thin:@(DESCRIPTION=(PASSWORD=blocked)(HOST=db.example.test))",
+        "jdbc:oracle:thin:@(DESCRIPTION=(USER=blocked)(HOST=db.example.test))",
     ],
 )
 def test_jdbc_url_parser_rejects_credentials_across_vendor_syntaxes(jdbc_url):
@@ -172,3 +175,37 @@ def test_jdbc_url_parser_extracts_safe_postgresql_endpoint():
     assert parsed.port == 5432
     assert parsed.database == "demo"
     assert parsed.properties == {"sslmode": "verify-full"}
+
+
+def _jdbc_config(**overrides):
+    payload = {
+        "source_type": "jdbc",
+        "driver_id": "postgresql",
+        "connection_ref": "connection:neon-demo",
+        "jdbc_url": "jdbc:postgresql://db.example.test/demo?sslmode=verify-full",
+        "host_allowlist": ["db.example.test"],
+        "database_allowlist": ["demo"],
+        "catalog_allowlist": ["demo"],
+        "schema_allowlist": ["rag_demo_source"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"driver_id": "uploaded-jar"},
+        {"jdbc_url": "jdbc:postgresql://other.example.test/demo?sslmode=verify-full"},
+        {"jdbc_url": "jdbc:postgresql://db.example.test/other?sslmode=verify-full"},
+        {"jdbc_url": "jdbc:postgresql://db.example.test/demo?sslmode=require"},
+        {
+            "jdbc_url": (
+                "jdbc:postgresql://db.example.test/demo?" "sslmode=verify-full&connectTimeout=100"
+            )
+        },
+    ],
+)
+def test_jdbc_config_enforces_registry_target_allowlists_and_tls(overrides):
+    with pytest.raises(ValidationError):
+        parse_source_config(_jdbc_config(**overrides))

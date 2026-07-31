@@ -186,10 +186,15 @@ class JDBCMetadataPolicy(BaseModel):
 class JDBCSourceConfig(SourceConfigBase):
     source_type: Literal["jdbc"] = "jdbc"
     driver_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    driver_registry_version: Literal["1"] = "1"
     connection_ref: str = Field(min_length=3, max_length=255)
-    jdbc_url: str | None = Field(default=None, max_length=2000)
-    catalog_allowlist: list[str] = Field(default_factory=list, max_length=100)
+    jdbc_url: str = Field(min_length=10, max_length=2000)
+    host_allowlist: list[str] = Field(min_length=1, max_length=100)
+    database_allowlist: list[str] = Field(min_length=1, max_length=100)
+    catalog_allowlist: list[str] = Field(min_length=1, max_length=100)
     schema_allowlist: list[str] = Field(min_length=1, max_length=100)
+    connect_timeout_sec: int = Field(default=10, ge=1, le=60)
+    statement_timeout_ms: int = Field(default=15_000, ge=100, le=120_000)
     metadata_policy: JDBCMetadataPolicy = Field(default_factory=JDBCMetadataPolicy)
 
     @field_validator("connection_ref")
@@ -201,12 +206,49 @@ class JDBCSourceConfig(SourceConfigBase):
 
     @field_validator("jdbc_url")
     @classmethod
-    def reject_embedded_jdbc_secret(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
+    def reject_embedded_jdbc_secret(cls, value: str) -> str:
         raw = value.strip()
         parse_jdbc_url(raw)
         return raw
+
+    @field_validator(
+        "host_allowlist", "database_allowlist", "catalog_allowlist", "schema_allowlist"
+    )
+    @classmethod
+    def normalize_jdbc_allowlist(cls, values: list[str], info) -> list[str]:
+        normalized = []
+        for raw in values:
+            value = raw.strip().casefold() if info.field_name == "host_allowlist" else raw.strip()
+            if (
+                not value
+                or len(value) > 255
+                or any(character in value for character in ("/", "@", ":", "?", "#"))
+            ):
+                raise ValueError(f"{info.field_name} contains an invalid entry.")
+            normalized.append(value.rstrip(".") if info.field_name == "host_allowlist" else value)
+        return sorted(set(normalized))
+
+    @model_validator(mode="after")
+    def validate_managed_jdbc_target(self):
+        if self.credential_ref is not None:
+            raise ValueError("JDBC sources use connection_ref instead of credential_ref.")
+        parsed = parse_jdbc_url(self.jdbc_url)
+        if parsed.dialect != "postgresql":
+            raise ValueError("Only the managed PostgreSQL JDBC driver is currently supported.")
+        if self.driver_id != "postgresql":
+            raise ValueError("driver_id is not present in the managed driver registry.")
+        if parsed.host not in self.host_allowlist:
+            raise ValueError("JDBC host must be explicitly listed in host_allowlist.")
+        if not parsed.database or parsed.database not in self.database_allowlist:
+            raise ValueError("JDBC database must be explicitly listed in database_allowlist.")
+        if parsed.database not in self.catalog_allowlist:
+            raise ValueError("PostgreSQL database must be listed in catalog_allowlist.")
+        properties = {key.casefold(): value for key, value in parsed.properties.items()}
+        if set(properties) - {"sslmode"}:
+            raise ValueError("jdbc_url contains a property not allowed by the driver registry.")
+        if properties.get("sslmode", "").casefold() != "verify-full":
+            raise ValueError("PostgreSQL JDBC metadata connections require sslmode=verify-full.")
+        return self
 
 
 SourceConfig = Annotated[

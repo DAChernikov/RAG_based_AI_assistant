@@ -139,6 +139,59 @@ async def test_pipeline_incremental_content_reuse_activation_and_tenant_isolatio
         assert session.scalar(select(func.count(DocumentChunk.id))) == 2
 
 
+@pytest.mark.asyncio
+async def test_pipeline_routes_jdbc_metadata_through_existing_version_lifecycle(
+    ingestion_context,
+):
+    repository, factory, tenant, _other, _website_source = ingestion_context
+    source = repository.create_source(
+        tenant.id,
+        "Database metadata",
+        "jdbc",
+        "1.0",
+        {
+            "source_type": "jdbc",
+            "config_version": "1.0",
+            "driver_id": "postgresql",
+            "connection_ref": "connection:demo",
+            "jdbc_url": "jdbc:postgresql://db.example.test/demo?sslmode=verify-full",
+            "host_allowlist": ["db.example.test"],
+            "database_allowlist": ["demo"],
+            "catalog_allowlist": ["demo"],
+            "schema_allowlist": ["rag_demo_source"],
+        },
+        True,
+    )
+    jdbc_document = document("demo.rag_demo_source.accounts", '{"relation":"accounts"}')
+    jdbc_connector = SequentialConnector(
+        DiscoveryResult(
+            documents=(jdbc_document,),
+            added=(jdbc_document.object_key,),
+            modified=(),
+            unchanged=(),
+            deleted=(),
+            source_revision="b" * 64,
+        )
+    )
+    unused = SequentialConnector()
+    pipeline = IngestionPipeline(repository, unused, unused, jdbc_connector)
+    run, version, contract, _ = create_job(repository, tenant, source, "jdbc-refresh")
+    _running, lease = repository.claim_ingestion_run(run.id, "jdbc-worker", 60)
+
+    await pipeline.execute(
+        contract,
+        lambda _event, _stage: _record([], _event, _stage),
+        lease_token=lease,
+    )
+    assert repository.complete_ingestion_job(run.id, lease)
+    assert repository.get_version(tenant.id, source.id, version.id).status == "active"
+    with factory() as session:
+        stored = session.scalar(
+            select(NormalizedDocument).where(NormalizedDocument.source_version_id == version.id)
+        )
+        assert stored.object_key == "demo.rag_demo_source.accounts"
+
+
 async def _record(events, event, stage):
     events.append((event, stage))
 

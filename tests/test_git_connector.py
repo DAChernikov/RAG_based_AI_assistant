@@ -130,3 +130,17 @@ async def test_git_rejects_unapproved_credential_environment(tmp_path):
     )
     with pytest.raises(CredentialIsolationError):
         await connector.discover(config)
+
+
+@pytest.mark.asyncio
+async def test_git_rejects_cross_connector_credential_material(tmp_path):
+    class CrossChannelResolver(CredentialResolver):
+        async def resolve(self, _reference: str) -> CredentialMaterial:
+            return CredentialMaterial(http_headers={"Authorization": "Bearer fixture"})
+
+    connector = GitConnector(CrossChannelResolver())
+    config = make_config(tmp_path, "deadbeef").model_copy(
+        update={"credential_ref": "credential:git"}
+    )
+    with pytest.raises(CredentialIsolationError, match="non-Git"):
+        await connector.discover(config)

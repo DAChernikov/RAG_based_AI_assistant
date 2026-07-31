@@ -37,6 +37,12 @@ def _reject_secret_properties(properties: dict[str, str]) -> None:
         raise ValueError("jdbc_url must not contain credential properties.")
 
 
+def _reject_secret_assignments(value: str) -> None:
+    keys = re.findall(r"(?:^|[?;&(),])\s*([A-Za-z0-9_.%-]+)\s*=", value)
+    if any(_secret_key(key) for key in keys):
+        raise ValueError("jdbc_url must not contain credential properties.")
+
+
 def parse_jdbc_url(value: str) -> ParsedJDBCUrl:
     raw = value.strip()
     lower = raw.casefold()
@@ -93,11 +99,7 @@ def parse_jdbc_url(value: str) -> ParsedJDBCUrl:
         if not target.startswith("@"):
             raise ValueError("Oracle thin JDBC URL must not contain username/password.")
         target = target[1:]
-        if re.search(
-            r"(?i)(?:^|[?;&(),])\s*(?:password|passwd|pwd|token|secret|apikey)\s*=",
-            target,
-        ):
-            raise ValueError("jdbc_url must not contain credential properties.")
+        _reject_secret_assignments(target)
         if target.startswith("//"):
             parsed = urlsplit(f"oracle:{target}")
             return ParsedJDBCUrl(
@@ -120,11 +122,7 @@ def parse_jdbc_url(value: str) -> ParsedJDBCUrl:
         raise ValueError("jdbc_url must not contain embedded credentials.")
     properties = dict(parse_qsl(parsed.query, keep_blank_values=True))
     _reject_secret_properties(properties)
-    if re.search(
-        r"(?i)(?:^|[?;&(),])\s*(?:password|passwd|pwd|token|secret|apikey)\s*=",
-        raw,
-    ):
-        raise ValueError("jdbc_url must not contain credential properties.")
+    _reject_secret_assignments(raw)
     return ParsedJDBCUrl(
         dialect=parsed.scheme.casefold(),
         host=(parsed.hostname or "").casefold() or None,

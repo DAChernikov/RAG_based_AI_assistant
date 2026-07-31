@@ -12,6 +12,7 @@ from pathlib import Path
 from app.catalog.configs import GitSourceConfig
 from app.connectors.base import (
     ConnectorDocument,
+    CredentialIsolationError,
     CredentialMaterial,
     CredentialResolver,
     DiscoveryResult,
@@ -193,6 +194,10 @@ class GitConnector:
             if config.credential_ref
             else CredentialMaterial()
         )
+        if credentials.http_headers or credentials.database_parameters:
+            raise CredentialIsolationError(
+                "Git credential reference contains non-Git credential material."
+            )
         with tempfile.TemporaryDirectory(prefix="rag-git-") as temporary:
             root = Path(temporary)
             environment = self._isolated_environment(root, credentials, config.repository_url)

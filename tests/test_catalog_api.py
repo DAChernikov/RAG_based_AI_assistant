@@ -16,7 +16,7 @@ from app.auth.security import Principal
 from app.catalog.repository import CatalogRepository
 from app.catalog.service import CatalogService
 from app.state.auth_repository import AuthRepository
-from app.state.models import AuditEvent, Base, Tenant, User
+from app.state.models import AuditEvent, Base, KnowledgeSource, Tenant, User
 
 
 class AsyncCallAdapter:
@@ -124,6 +124,24 @@ def test_catalog_admin_rbac_tenant_isolation_and_audit():
         },
     )
     assert source.status_code == 201
+    jdbc_source = client.post(
+        "/v1/admin/knowledge-sources",
+        json={
+            "name": "Database metadata",
+            "config": {
+                "source_type": "jdbc",
+                "driver_id": "postgresql",
+                "connection_ref": "connection:neon-demo",
+                "jdbc_url": ("jdbc:postgresql://db.example.test/demo?sslmode=verify-full"),
+                "host_allowlist": ["db.example.test"],
+                "database_allowlist": ["demo"],
+                "catalog_allowlist": ["demo"],
+                "schema_allowlist": ["rag_demo_source"],
+            },
+        },
+    )
+    assert jdbc_source.status_code == 201
+    assert jdbc_source.json()["config"]["connection_ref"] == "connection:neon-demo"
     knowledge_base_id = knowledge_base.json()["id"]
     source_id = source.json()["id"]
     assert (
@@ -139,6 +157,10 @@ def test_catalog_admin_rbac_tenant_isolation_and_audit():
 
     with factory() as session:
         actions = set(session.scalars(select(AuditEvent.action)))
+        stored_jdbc = session.scalar(
+            select(KnowledgeSource).where(KnowledgeSource.name == "Database metadata")
+        )
+        assert "password" not in str(stored_jdbc.config).casefold()
         assert {
             "knowledge_base.create",
             "knowledge_source.create",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -225,6 +227,54 @@ async def test_truncated_crawl_preserves_unvisited_previous_objects():
 
 
 @pytest.mark.asyncio
+async def test_depth_limited_crawl_cannot_delete_previously_known_page():
+    previous_url = "https://docs.example.test/previous"
+    previous = {previous_url: PreviousObject(previous_url, "a" * 64, {"etag": '"old"'})}
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/":
+            return httpx.Response(
+                200,
+                text='<a href="/too-deep">Deep</a>',
+                headers={"content-type": "text/html"},
+            )
+        return httpx.Response(404)
+
+    connector = WebsiteConnector(
+        FakeCredentialResolver(),
+        transport=httpx.MockTransport(handler),
+        host_validator=allow_test_host,
+    )
+    result = await connector.discover(
+        config(max_depth=0, use_sitemap=False, credential_ref="credential:docs"), previous
+    )
+    assert result.complete is False
+    assert result.incomplete_reasons == ("max_depth",)
+    assert result.deleted == ()
+    assert result.unchanged == (previous_url,)
+
+
+@pytest.mark.asyncio
+async def test_time_limited_crawl_preserves_previous_objects(monkeypatch):
+    previous_url = "https://docs.example.test/previous"
+    previous = {previous_url: PreviousObject(previous_url, "a" * 64)}
+    ticks = iter((0.0, 10.0))
+    monkeypatch.setattr(
+        "app.connectors.website.time", SimpleNamespace(monotonic=lambda: next(ticks))
+    )
+    connector = WebsiteConnector(
+        FakeCredentialResolver(),
+        transport=httpx.MockTransport(lambda _request: pytest.fail("request was not expected")),
+        host_validator=allow_test_host,
+    )
+    result = await connector.discover(config(max_crawl_seconds=1, use_sitemap=False), previous)
+    assert result.complete is False
+    assert result.incomplete_reasons == ("max_crawl_seconds",)
+    assert result.deleted == ()
+    assert result.unchanged == (previous_url,)
+
+
+@pytest.mark.asyncio
 async def test_tree_parser_preserves_nested_text_and_table_structure():
     html = (
         "<h1>API</h1><p>Hello <strong>nested <code>call()</code></strong> tail.</p>"
@@ -286,3 +336,20 @@ async def test_website_credentials_are_origin_scoped_and_headers_allowlisted():
     )
     with pytest.raises(CredentialIsolationError):
         await unsafe.discover(config(credential_ref="credential:docs"))
+
+
+@pytest.mark.asyncio
+async def test_website_rejects_cross_connector_credential_material():
+    class CrossChannelResolver(CredentialResolver):
+        async def resolve(self, _reference: str) -> CredentialMaterial:
+            return CredentialMaterial(
+                database_parameters={"username": "wrong-channel", "password": "fixture"}
+            )
+
+    connector = WebsiteConnector(
+        CrossChannelResolver(),
+        transport=httpx.MockTransport(lambda _request: pytest.fail("request was not expected")),
+        host_validator=allow_test_host,
+    )
+    with pytest.raises(CredentialIsolationError, match="non-HTTP"):
+        await connector.discover(config(credential_ref="credential:unsafe"))

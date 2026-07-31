@@ -10,6 +10,7 @@ from app.api.config import settings
 from app.catalog.repository import CatalogRepository, LeaseLostError
 from app.connectors.base import EnvironmentCredentialResolver, TransientConnectorError
 from app.connectors.git import GitConnector
+from app.connectors.jdbc import JDBCMetadataConnector
 from app.connectors.website import WebsiteConnector
 from app.ingestion.contracts import IngestionEvent, IngestionJobContract
 from app.ingestion.pipeline import IngestionCancelled, IngestionPipeline
@@ -190,6 +191,7 @@ async def async_main() -> None:
         repository,
         WebsiteConnector(resolver),
         GitConnector(resolver),
+        JDBCMetadataConnector(resolver),
     )
     queue = RedisIngestionQueue()
     worker = IngestionWorker(repository, queue, pipeline)
