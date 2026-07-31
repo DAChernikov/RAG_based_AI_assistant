@@ -158,6 +158,9 @@ class GitConnector:
             total_bytes = 0
             for relative in paths:
                 path = repository / relative
+                # A disabled submodule is represented by a gitlink, not a regular file.
+                if not path.is_file():
+                    continue
                 try:
                     content = path.read_bytes()
                 except OSError as exc:
@@ -172,6 +175,8 @@ class GitConnector:
                 try:
                     text = content.decode("utf-8")
                 except UnicodeDecodeError:
+                    continue
+                if text.startswith("version https://git-lfs.github.com/spec/v1\n"):
                     continue
                 checksum = hashlib.sha256(content).hexdigest()
                 language, parsed_chunks = parse_code(relative, text)

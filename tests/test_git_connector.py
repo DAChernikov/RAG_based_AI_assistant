@@ -51,6 +51,19 @@ async def test_git_incremental_rename_delete_and_structure_parsing(tmp_path):
     (repository / ".env").write_text("TOKEN=never-ingest")
     git(repository, "add", ".")
     git(repository, "commit", "--quiet", "-m", "first")
+    submodule_sha = git(repository, "rev-parse", "HEAD")
+    git(
+        repository,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"160000,{submodule_sha},external/dependency",
+    )
+    (repository / "large.bin").write_text(
+        "version https://git-lfs.github.com/spec/v1\n" "oid sha256:" + "a" * 64 + "\nsize 1000000\n"
+    )
+    git(repository, "add", "large.bin")
+    git(repository, "commit", "--quiet", "-m", "gitlink and lfs pointer")
     first_sha = git(repository, "rev-parse", "HEAD")
 
     connector = GitConnector(FakeCredentialResolver())
