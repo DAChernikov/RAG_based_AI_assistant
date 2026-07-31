@@ -51,6 +51,26 @@ def test_typed_website_git_and_jdbc_configs():
 
 
 @pytest.mark.parametrize(
+    "repository_url",
+    [
+        "https://git.example.com/team/project.git",
+        "ssh://git@git.example.com/team/project.git",
+        "git@git.example.com:team/project.git",
+    ],
+)
+def test_git_config_accepts_supported_repository_urls(repository_url):
+    config = parse_source_config(
+        {
+            "source_type": "git",
+            "repository_url": repository_url,
+            "ref_kind": "branch",
+            "ref": "main",
+        }
+    )
+    assert config.repository_url == repository_url
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {
@@ -86,6 +106,27 @@ def test_typed_website_git_and_jdbc_configs():
             "driver_id": "postgresql",
             "connection_ref": "connection:demo",
             "jdbc_url": "jdbc:postgresql://db.example.com/demo?password=plaintext",
+            "schema_allowlist": ["public"],
+        },
+        {
+            "source_type": "jdbc",
+            "driver_id": "postgresql",
+            "connection_ref": "connection:demo",
+            "jdbc_url": "jdbc:postgresql://db.example.com/demo?sslpassword=plaintext",
+            "schema_allowlist": ["public"],
+        },
+        {
+            "source_type": "jdbc",
+            "driver_id": "postgresql",
+            "connection_ref": "connection:demo",
+            "jdbc_url": "jdbc:postgresql://db.example.com/demo?access_token=plaintext",
+            "schema_allowlist": ["public"],
+        },
+        {
+            "source_type": "jdbc",
+            "driver_id": "postgresql",
+            "connection_ref": "connection:demo",
+            "jdbc_url": "jdbc:postgresql://db.example.com/demo?apiKey=plaintext",
             "schema_allowlist": ["public"],
         },
     ],

@@ -17,16 +17,31 @@ from pydantic import (
 _CREDENTIAL_REF = re.compile(
     r"^(?:cred|credential|vault|secretref|connection):[A-Za-z0-9_.:/-]{1,240}$"
 )
-_SECRET_KEYS = {"password", "passwd", "token", "secret", "api_key", "private_key"}
+_SECRET_KEYS = {
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "apikey",
+    "privatekey",
+    "sslpassword",
+    "accesstoken",
+    "refreshtoken",
+    "clientsecret",
+}
+
+
+def _is_secret_key(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return normalized in _SECRET_KEYS or any(
+        marker in normalized for marker in ("password", "token", "secret", "apikey")
+    )
 
 
 def _reject_secret_fields(value: Any, path: str = "config") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            normalized = str(key).lower()
-            if normalized in _SECRET_KEYS or any(
-                marker in normalized for marker in ("password", "token", "secret")
-            ):
+            if _is_secret_key(str(key)):
                 raise ValueError(f"Plaintext secret field is forbidden at {path}.{key}.")
             _reject_secret_fields(child, f"{path}.{key}")
     elif isinstance(value, list):
@@ -94,7 +109,7 @@ class WebsiteSourceConfig(SourceConfigBase):
 
 class GitSourceConfig(SourceConfigBase):
     source_type: Literal["git"] = "git"
-    repository_url: AnyHttpUrl
+    repository_url: str = Field(min_length=3, max_length=2000)
     ref_kind: Literal["branch", "tag", "commit"] = "branch"
     ref: str = Field(default="main", min_length=1, max_length=255)
     is_group: bool = False
@@ -103,10 +118,18 @@ class GitSourceConfig(SourceConfigBase):
 
     @field_validator("repository_url")
     @classmethod
-    def reject_repository_userinfo(cls, value: AnyHttpUrl) -> AnyHttpUrl:
-        if value.username is not None or value.password is not None:
+    def validate_repository_url(cls, value: str) -> str:
+        raw = value.strip()
+        if re.fullmatch(r"git@[A-Za-z0-9.-]+:[A-Za-z0-9_./-]+", raw):
+            return raw
+        parsed = urlsplit(raw)
+        if parsed.scheme not in {"http", "https", "ssh"} or not parsed.hostname:
+            raise ValueError("repository_url must use HTTPS, ssh:// or git@host:path syntax.")
+        if parsed.password is not None or (
+            parsed.scheme in {"http", "https"} and parsed.username is not None
+        ):
             raise ValueError("repository_url must not contain embedded credentials.")
-        return value
+        return raw
 
 
 class JDBCMetadataPolicy(BaseModel):
@@ -147,10 +170,8 @@ class JDBCSourceConfig(SourceConfigBase):
         parsed = urlsplit(raw[5:])
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("jdbc_url must not contain embedded credentials.")
-        sensitive_query_keys = {
-            key.lower() for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
-        }
-        if sensitive_query_keys & _SECRET_KEYS:
+        sensitive_query_keys = {key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+        if any(_is_secret_key(key) for key in sensitive_query_keys):
             raise ValueError("jdbc_url must not contain credential query parameters.")
         return raw
 

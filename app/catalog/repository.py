@@ -29,6 +29,10 @@ class ImmutableVersionError(RuntimeError):
     pass
 
 
+class SourceHistoryExistsError(RuntimeError):
+    pass
+
+
 ALLOWED_TRANSITIONS = {
     SourceVersionStatus.DISCOVERED.value: {SourceVersionStatus.INGESTING.value},
     SourceVersionStatus.INGESTING.value: {
@@ -196,6 +200,13 @@ class CatalogRepository:
             )
             if item is None:
                 return False
+            has_versions = session.scalar(
+                select(SourceVersion.id).where(SourceVersion.source_id == source_id).limit(1)
+            )
+            if has_versions is not None:
+                raise SourceHistoryExistsError(
+                    "Source with ingestion history cannot be deleted; disable it instead."
+                )
             session.delete(item)
             return True
 
@@ -486,3 +497,45 @@ class CatalogRepository:
                 run.status = status
                 run.completed_at = datetime.now(UTC)
                 run.error_code = error_code
+
+    def fail_ingestion(
+        self,
+        tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        version_id: uuid.UUID,
+        run_id: uuid.UUID,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        with self.session_factory.begin() as session:
+            version = session.scalar(
+                select(SourceVersion)
+                .where(
+                    SourceVersion.id == version_id,
+                    SourceVersion.source_id == source_id,
+                    SourceVersion.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            run = session.scalar(
+                select(IngestionRun)
+                .where(
+                    IngestionRun.id == run_id,
+                    IngestionRun.source_version_id == version_id,
+                    IngestionRun.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            if version is not None and version.status not in {
+                SourceVersionStatus.ACTIVE.value,
+                SourceVersionStatus.SUPERSEDED.value,
+            }:
+                version.status = SourceVersionStatus.FAILED.value
+                version.failed_at = datetime.now(UTC)
+                version.failure_code = error_code[:100]
+                version.failure_message = error_message[:500]
+            if run is not None:
+                run.status = "failed"
+                run.completed_at = datetime.now(UTC)
+                run.error_code = error_code[:100]
+                run.error_message = error_message[:500]

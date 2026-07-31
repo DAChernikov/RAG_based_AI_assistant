@@ -8,7 +8,11 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.dependencies import get_runtime_state, require_admin
 from app.auth.security import Principal
-from app.catalog.repository import CatalogNotFoundError, InvalidVersionTransitionError
+from app.catalog.repository import (
+    CatalogNotFoundError,
+    InvalidVersionTransitionError,
+    SourceHistoryExistsError,
+)
 from app.catalog.schemas import (
     IngestionRunResponse,
     KnowledgeBaseCreate,
@@ -351,9 +355,12 @@ async def delete_source(
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
-    deleted = await runtime["catalog_service"].call(
-        runtime["catalog_repository"].delete_source, principal.tenant_id, source_id
-    )
+    try:
+        deleted = await runtime["catalog_service"].call(
+            runtime["catalog_repository"].delete_source, principal.tenant_id, source_id
+        )
+    except SourceHistoryExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="Knowledge source was not found.")
     await _audit(

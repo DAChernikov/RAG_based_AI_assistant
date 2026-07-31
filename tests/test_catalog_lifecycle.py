@@ -11,6 +11,7 @@ from app.catalog.repository import (
     CatalogRepository,
     ImmutableVersionError,
     InvalidVersionTransitionError,
+    SourceHistoryExistsError,
 )
 from app.catalog.service import CatalogService
 from app.state.models import Base, IngestionRun, SourceObject, SourceVersion, Tenant
@@ -106,3 +107,45 @@ def test_allowed_and_forbidden_transitions(catalog_context):
         repository.transition_version(tenant.id, source.id, version.id, "active")
     with pytest.raises(InvalidVersionTransitionError):
         repository.activate_version(tenant.id, source.id, version.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["ingesting", "staged", "validating"])
+async def test_ingestion_failure_marks_run_and_version_failed(catalog_context, stage):
+    repository, service, factory, tenant, source = catalog_context
+    with pytest.raises(RuntimeError, match="fixture ingestion failure"):
+        await service.record_fixture_ingestion(
+            tenant.id,
+            source.id,
+            objects=[
+                {
+                    "object_key": "index.html",
+                    "checksum": "a" * 64,
+                    "byte_count": 10,
+                    "chunk_count": 1,
+                }
+            ],
+            fail_at=stage,
+        )
+
+    with factory() as session:
+        version = session.scalar(select(SourceVersion).order_by(SourceVersion.created_at.desc()))
+        run = session.scalar(select(IngestionRun).order_by(IngestionRun.created_at.desc()))
+        assert version.status == "failed"
+        assert version.failure_code == "ingestion_failed"
+        assert version.failure_message == "Ingestion failed. See logs using the correlation ID."
+        assert run.status == "failed"
+        assert run.error_code == "ingestion_failed"
+        assert run.error_message == "Ingestion failed. See logs using the correlation ID."
+
+
+@pytest.mark.asyncio
+async def test_source_with_immutable_history_cannot_be_deleted(catalog_context):
+    repository, service, _, tenant, source = catalog_context
+    await service.record_fixture_ingestion(tenant.id, source.id, objects=[])
+
+    with pytest.raises(SourceHistoryExistsError):
+        repository.delete_source(tenant.id, source.id)
+
+    disabled = repository.update_source(tenant.id, source.id, {"is_enabled": False})
+    assert disabled.is_enabled is False

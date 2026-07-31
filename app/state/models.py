@@ -403,6 +403,7 @@ class SourceVersion(TimestampMixin, Base):
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(String(100))
+    failure_message: Mapped[str | None] = mapped_column(String(500))
 
 
 class SourceObject(Base):

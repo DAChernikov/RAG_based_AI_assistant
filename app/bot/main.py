@@ -7,6 +7,8 @@ from app.bot.handlers import ready_handler, start_handler, text_handler
 
 
 def build_application() -> Application:
+    if not bot_settings.telegram_bot_token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required to start the Telegram bot.")
     application = Application.builder().token(bot_settings.telegram_bot_token).build()
 
     application.add_handler(CommandHandler("start", start_handler))

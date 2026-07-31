@@ -36,6 +36,7 @@ class CatalogService:
         objects: list[dict[str, Any]],
         parser_version: str = "fixture-parser/1",
         connector_version: str = "fixture-connector/1",
+        fail_at: str | None = None,
     ):
         """Test/application hook; connectors will replace this in later iterations."""
         version = await self.call(self.repository.create_version, tenant_id, source_id)
@@ -54,6 +55,8 @@ class CatalogService:
                 version.id,
                 SourceVersionStatus.INGESTING.value,
             )
+            if fail_at == "ingesting":
+                raise RuntimeError("fixture ingestion failure")
             normalized = [
                 {
                     "object_key": item["object_key"],
@@ -96,8 +99,18 @@ class CatalogService:
                     version.id,
                     status,
                 )
+                if fail_at == status:
+                    raise RuntimeError("fixture ingestion failure")
             await self.call(self.repository.complete_ingestion_run, run.id, "completed")
             return version
         except Exception:
-            await self.call(self.repository.complete_ingestion_run, run.id, "failed", "fixture")
+            await self.call(
+                self.repository.fail_ingestion,
+                tenant_id,
+                source_id,
+                version.id,
+                run.id,
+                "ingestion_failed",
+                "Ingestion failed. See logs using the correlation ID.",
+            )
             raise
