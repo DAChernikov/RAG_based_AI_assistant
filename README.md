@@ -4,15 +4,15 @@ Self-hosted RAG-ассистент с FastAPI, Telegram-клиентом, Postgr
 Redis Streams и отдельным inference worker. Генерация выполняется только через локальный или
 self-hosted OpenAI-compatible HTTP API. Коммерческие внешние LLM API не используются.
 
-Iteration 2 реализует два режима:
+Реализованы два режима:
 
 - `direct` — совместимый диагностический путь, где API загружает текущий retriever;
 - `queued` — основной продуктовый путь: API сохраняет запрос в PostgreSQL, отправляет job в
   Redis Streams, а retriever и model client живут в inference worker.
 
-Production authentication/RBAC, Web UI, source connectors, pgvector и multi-label retrieval
-пока не реализованы. Versioned job endpoints являются development-only до появления
-authentication.
+Локальная аутентификация, tenant isolation, роли `admin`/`user`, API keys и audit log
+реализованы в Iteration 3. Web UI, source connectors, pgvector и multi-label retrieval пока
+не реализованы.
 
 ## Реализованная runtime-схема
 
@@ -42,12 +42,17 @@ make install
 cp .env.example .env
 make infra-up
 make migrate
-make seed-dev
+poetry run python -m app.state.bootstrap_admin \
+  --tenant-slug example \
+  --tenant-name "Example tenant" \
+  --username admin \
+  --display-name "Local administrator"
 make run-worker
 make run-api
 ```
 
-Перед worker запустите Ollama нативно:
+Bootstrap-команда запрашивает пароль без отображения и не принимает его аргументом командной
+строки. Перед worker запустите Ollama нативно:
 
 ```bash
 ollama serve
@@ -62,7 +67,11 @@ unit tests.
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
+curl -X POST http://127.0.0.1:8000/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_slug":"example","username":"admin","password":"<password>"}'
 curl -X POST http://127.0.0.1:8000/ask \
+  -H "Authorization: Bearer <access-token>" \
   -H "Content-Type: application/json" \
   -d '{"question":"What is Apache Spark?"}'
 ```
@@ -80,12 +89,25 @@ Backward-compatible:
 - `POST /ask`
 - `POST /ask/stream`
 
-Development-only asynchronous API:
+Protected asynchronous API:
 
 - `POST /v1/inference-jobs`
 - `GET /v1/inference-jobs/{job_id}`
 - `GET /v1/inference-jobs/{job_id}/events`
 - `GET /v1/conversations/{conversation_id}`
+
+Authentication and administration:
+
+- `POST /v1/auth/login`, `/v1/auth/refresh`, `/v1/auth/logout`;
+- `GET /v1/auth/me`;
+- `GET|POST /v1/admin/users`;
+- `GET|PATCH|DELETE /v1/admin/users/{user_id}`;
+- `GET|POST /v1/api-keys`;
+- `DELETE /v1/api-keys/{key_id}`.
+
+`/health` and sanitized `/ready` remain public. `/admin/runtime` is admin-only. Jobs,
+conversations and SSE streams are filtered by authenticated tenant and user. Telegram and
+external clients use `X-API-Key`; its full value is displayed only once.
 
 `AskRequest` получил только optional `conversation_id`. `Idempotency-Key` поддерживается для
 `/ask`, `/ask/stream` и создания async job. Одинаковый key и payload возвращает существующий
@@ -113,8 +135,9 @@ make migrate
 make seed-dev
 ```
 
-Миграции не запускаются при import или API startup. Compatibility identity создаётся только
-управляемой seed-командой. Анонимный API не принимает `tenant_id`/`user_id`.
+Миграции не запускаются при import или API startup. Compatibility identity разрешена только
+при явном `AUTH_DISABLED=true` в `APP_ENV=dev|test`; production configuration fails closed.
+API не принимает доверенные `tenant_id`/`user_id` из request body.
 
 ## MacBook Air 24 GB profile
 
@@ -182,6 +205,12 @@ models и training opt-in; `RUN_TRAINING = False` по умолчанию. Ре�
 | `INFERENCE_WAIT_TIMEOUT_SEC` | ожидание backward-compatible `/ask` |
 | `INFERENCE_MAX_ATTEMPTS` | bounded worker attempts |
 | `WORKER_ID` | стабильный worker identity |
+| `AUTH_DISABLED` | explicit dev/test compatibility mode |
+| `JWT_SECRET` | local JWT signing secret, минимум 32 символа |
+| `ACCESS_TOKEN_TTL_SEC` | lifetime короткоживущего access token |
+| `REFRESH_TOKEN_TTL_SEC` | lifetime rotating opaque refresh token |
+| `API_KEY_DEFAULT_TTL_SEC` | default lifetime API key |
+| `API_KEY` | Telegram credential для заголовка `X-API-Key` |
 
 Остальные defaults и safe placeholders находятся в `.env.example`. Secrets не должны
 попадать в Git, docs, logs или Redis contracts.
@@ -200,4 +229,4 @@ make smoke-test
 docker compose config --quiet
 ```
 
-Подробное ручное тестирование: [Iteration 02 manual guide](docs/testing/iteration-02-manual.md).
+Подробное ручное тестирование: [Iteration 03 manual guide](docs/testing/iteration-03-manual.md).

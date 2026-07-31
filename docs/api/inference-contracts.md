@@ -1,6 +1,6 @@
 # Inference contracts v1
 
-Status: implemented for development queued mode. Authentication is not implemented.
+Status: implemented for authenticated queued mode.
 
 ## Job contract `1.0`
 
@@ -33,3 +33,7 @@ Direct `/ask/stream` keeps the old `data: {"type": ..., "data": ...}` format. Qu
 `/ask/stream` adds SSE `id` and `event`, sends the complete v1 contract, and also includes
 legacy `type`/`data` aliases. `/v1/inference-jobs/{id}/events` emits only the versioned
 contract.
+
+All inference endpoints require either a JWT access token or a scoped API key. Tenant and user
+identifiers come exclusively from the authenticated principal. A client without credentials
+receives HTTP 401; access to another user's job, conversation or SSE stream is HTTP 404.
