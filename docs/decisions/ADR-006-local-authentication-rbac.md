@@ -23,5 +23,5 @@ and a Web UI are added. A hosted identity provider would conflict with that depl
 ## Consequences
 
 Deployments configure a secret of at least 32 characters and bootstrap the first administrator
-locally. Asymmetric signing and signing-key rotation remain future hardening. Iteration 4 moved
+locally. Asymmetric signing is an optional deployment extension; signing-secret rotation is operationalized. Iteration 4 moved
 login throttling to an atomic Redis-backed limiter shared by API processes.

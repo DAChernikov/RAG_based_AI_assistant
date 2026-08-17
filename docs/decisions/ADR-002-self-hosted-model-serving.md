@@ -29,5 +29,5 @@ requires separate hardware and is not the laptop default.
 - Readiness and capacity checks will need to distinguish application readiness from model
   availability.
 
-Iteration 1 implements only the generator HTTP client. It does not download weights, start a
+ADR-010 extends this decision with the generator and embedding HTTP services. It does not download weights or start a
 model server, integrate BGE-M3, or add an SQL expert.

@@ -1,106 +1,24 @@
 # Product roadmap
 
-This roadmap is directional. Each iteration must remain reviewable, preserve the declared
-compatibility surface, update tests and documentation, and stop before the next iteration.
+## Completed product scope
 
-## Iteration 1 — Repository foundation and local model gateway
+- Repository foundation and self-hosted OpenAI-compatible generation gateway.
+- PostgreSQL system of record, Redis Streams, queued/resumable inference and Telegram API client.
+- Local authentication, tenant isolation, RBAC, refresh sessions, scoped API keys and audit.
+- Knowledge-base/source catalog with immutable Website, Git and PostgreSQL JDBC metadata versions.
+- Hardened incremental ingestion, managed JDBC registry and worker lease fencing.
+- BGE-M3-compatible embedding HTTP service, pgvector index lifecycle and indexing worker.
+- Tenant/KB-isolated dense + PostgreSQL full-text retrieval, RRF and optional HTTP reranking.
+- Multi-label routing, grounded citations and sqlglot AST/schema/read-only EXPLAIN pipeline.
+- Scheduler, retention, model/prompt registries, evaluation and observability.
+- React/TypeScript Web UI, hardened Compose, Helm artifacts, CI/security/SBOM gates and runbooks.
 
-Status: implemented on `feature/product-v1`.
+The active release surface and limitations are documented in `README.md`; capabilities are not inferred from old iteration documents.
 
-- audit and safely remove the obsolete Render/Gemini runtime layer;
-- establish repository instructions and architecture decisions;
-- call a self-hosted OpenAI-compatible generator through a provider-neutral client;
-- support non-streaming and SSE streaming with retries and error mapping;
-- document native macOS model serving and Docker host access;
-- preserve API, Telegram, retriever, SQL validation, and existing S3 artifact behavior.
+## Optional extensions
 
-This iteration does not load models, write to S3, connect to Neon, or add product data
-infrastructure.
-
-## Iteration 2 — Application state and asynchronous inference foundation
-
-Status: implemented on `feature/product-v1`.
-
-- PostgreSQL application-state schema and Alembic migration;
-- Redis Streams, consumer group, bounded retry, DLQ, pending reclaim and heartbeat;
-- versioned jobs/events, resumable SSE and async job endpoints;
-- idempotent answers and conversation history;
-- direct/queued compatibility, local Compose profiles and structured metric logs;
-- safe artifact staging and reproducible research workspace.
-
-Authentication, source connectors, pgvector, Neon access, S3 model writes and automatic model
-downloads remain out of scope.
-
-## Iteration 3 — Authentication, tenant isolation and RBAC
-
-Status: implemented on `feature/product-v1`.
-
-- local Argon2id authentication and short-lived JWT access tokens;
-- opaque rotating refresh sessions with reuse detection and family revocation;
-- tenant/user ownership, `admin`/`user` RBAC and admin user management;
-- scoped, expiring, revocable API keys for Telegram and external clients;
-- audit events without prompts or plaintext credentials;
-- concurrency-safe message sequences, idempotency and inference worker leases;
-- dev/test-only compatibility identity and fail-closed production configuration.
-
-Web UI, source connectors, pgvector, Neon access and retrieval/router changes remain out of
-scope.
-
-## Iteration 4 — Knowledge source catalog and immutable source versions
-
-Status: implemented on `feature/product-v1`.
-
-- tenant-scoped knowledge bases, sources, links, versions, objects and ingestion runs;
-- versioned typed Website, Git and JDBC configs with credential references only;
-- immutable manifests and objects after staging;
-- validated lifecycle, one active version, atomic activation and rollback;
-- admin-only tenant-isolated catalog API with security audit events;
-- Redis-backed distributed login throttling;
-- platform-exclusive native macOS and Linux CPU Torch dependencies.
-
-Website crawling, Git clone, JDBC connectivity, parsing, embeddings and scheduling remain out
-of scope. Lifecycle tests use an internal fixture connector through the application service.
-
-## Iteration 5 — Website/Git connectors and incremental ingestion
-
-Status: implemented on `feature/product-v1`.
-
-- SSRF-protected Website crawling with sitemap/link discovery, limits and conditional fetch;
-- isolated Git fetch pinned to a resolved commit, safe traversal and structure-aware parsing;
-- incremental add/change/rename/delete discovery and content-addressed document/chunk reuse;
-- separate Redis ingestion stream and worker with leases, reclaim, bounded retry and DLQ;
-- admin refresh, status, event and cancellation API with tenant isolation and audit events;
-- immutable staging, validation, optional atomic activation and sanitized failures.
-
-Scheduler, embeddings, pgvector, retrieval integration and Web UI remain out of scope.
-
-## Iteration 6 — JDBC metadata connector and ingestion hardening
-
-Status: implemented on `feature/product-v1`.
-
-- complete-discovery fencing prevents truncated Website crawls from producing deletions;
-- tree-based HTML extraction preserves nested text, lists, code and table structure;
-- connector credentials are channel-scoped and Git runs without ambient HOME/config state;
-- terminal ingestion reclaim atomically fails exhausted runs and lease tokens fence mutations;
-- a versioned managed driver registry exposes the preinstalled PostgreSQL metadata adapter;
-- JDBC targets require host/database/catalog/schema allowlists, verified TLS and fixed timeouts;
-- tables, views, columns, types, defaults, comments, PK/FK/unique constraints and indexes are
-  normalized into deterministic incremental documents and chunks;
-- Neon-compatible source configuration uses an environment-backed connection reference; no
-  remote Neon database was contacted or changed.
-
-Scheduler, embeddings, pgvector, retrieval integration and Web UI remain out of scope.
-
-## Later planned stages
-
-1. BGE-M3 embedding service, pgvector, hybrid retrieval, and index activation/rollback.
-2. Multi-label `RoutePlan`, parallel retrieval branches, merge/rerank, and hybrid answers.
-3. SQL AST/schema validation, safe `EXPLAIN`, bounded repair, and only then evaluation of a
-   dedicated SQL expert model.
-4. React/TypeScript Web UI for chat, history, sources, SQL results, and administration.
-5. Model/prompt registry, S3 model artifact cache workflow, evaluation framework, and mature
-   observability.
-6. Production deployment profiles and optional larger generator hardware.
-
-Stage ordering may change after measurements, but no stage should claim a future capability
-before its implementation and verification.
+- JS-rendered crawling and site-specific enterprise adapters.
+- Managed repository groups and additional structurally parsed languages.
+- Additional reviewed JDBC vendors/JVM adapters.
+- Provider-specific infrastructure modules and signed-image supply chain.
+- A separately measured SQL expert model when evaluation demonstrates a gain.

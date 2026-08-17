@@ -34,4 +34,5 @@ can be repeated, while PostgreSQL must remain the source of truth.
 The API remains responsive and ingestion scales independently from model inference. Delivery is
 at-least-once but processing is idempotent around the database lease. Content blobs require a
 future garbage-collection policy after version-retention rules are defined. JavaScript-rendered
-sites, repository groups, scheduler, embeddings and retrieval integration remain future work.
+sites and repository-group orchestration remain optional extensions; ADR-010 implements scheduler,
+embeddings and retrieval integration.

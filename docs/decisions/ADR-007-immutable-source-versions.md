@@ -29,4 +29,4 @@ incremental change detection and rollback unreliable.
 Connector workers can later build and validate a complete staging version without affecting
 retrieval. Failed versions cannot be activated. PostgreSQL is required for production-grade
 activation locking; SQLite remains unit-test-only. Physical artifact deletion, retention and
-garbage collection remain future work.
+garbage collection are provided by the index lifecycle and retention policy described in ADR-010.

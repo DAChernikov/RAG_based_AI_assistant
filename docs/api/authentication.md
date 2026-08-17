@@ -1,11 +1,12 @@
 # Authentication and authorization API
 
-Status: implemented in Iteration 3.
+Status: implemented product contract.
 
 ## Sessions
 
 - `POST /v1/auth/login` accepts `tenant_slug`, `username`, `password` and returns a short-lived
-  Bearer access token plus an opaque refresh token.
+  Bearer access token plus an opaque refresh token for non-browser clients. Browser mode stores
+  refresh in an HttpOnly cookie and uses a CSRF cookie/header pair.
 - `POST /v1/auth/refresh` consumes and rotates a refresh token. Reuse, expiry or revocation
   returns HTTP 401 and revokes the token family when it can be identified.
 - `POST /v1/auth/logout` revokes the supplied refresh session.

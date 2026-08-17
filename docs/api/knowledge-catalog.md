@@ -1,7 +1,7 @@
 # Knowledge source catalog API
 
 Status: admin-only catalog and on-demand Website, Git and PostgreSQL JDBC metadata ingestion
-are implemented. Scheduled refresh is not implemented.
+are implemented. Scheduled refresh is managed through `/v1/admin/schedules`.
 
 All paths require an authenticated `admin`. Tenant identity comes from the principal.
 
@@ -52,7 +52,7 @@ payload returns the same run; different input returns `409`. A queued or running
 cancelled. Completion is safe under Redis redelivery because a worker must own the matching
 PostgreSQL lease token.
 
-The event endpoint returns bounded Redis Stream history for a future admin UI. Events contain
+The event endpoint returns bounded Redis Stream history for the admin UI. Events contain
 only run/stage/status metadata; URLs with credentials, connector secrets and fetched content are
 not included.
 
@@ -93,7 +93,7 @@ discover -> incremental diff -> fetch/parse/chunk
 
 Any processing error marks both the source version and ingestion run failed with a sanitized
 message. Failed and staging versions are not retrieval-visible. Retrieval integration itself is
-outside Iteration 6.
+through the linked knowledge-base indexing lifecycle.
 
 ## Credential resolution
 

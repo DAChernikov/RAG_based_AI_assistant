@@ -1,6 +1,6 @@
 # ADR-005: PostgreSQL state with Redis Streams delivery
 
-- Status: Accepted and implemented in Iteration 2
+- Status: Superseded in part by ADR-010; PostgreSQL/Redis decision remains active
 - Date: 2026-07-30
 
 ## Context
@@ -16,9 +16,8 @@ jobs, answers and sources. Use Redis Streams for job delivery, bounded event ret
 consumer groups, pending reclaim, DLQ and worker heartbeat. The queued API never imports the
 retriever; one inference worker owns it.
 
-Keep `direct` mode for compatibility and diagnostics. Queued failures never silently fall back
-to direct execution. Migrations and compatibility identity seeding are explicit operator
-commands.
+All product inference uses the queued path. Queued failures never silently fall back to local
+direct execution. Migrations and bootstrap identity creation are explicit operator commands.
 
 ## Consequences
 

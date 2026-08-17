@@ -1,304 +1,83 @@
-# RAG-based AI Assistant
+# Self-hosted RAG Assistant
 
-Self-hosted RAG-ассистент с FastAPI, Telegram-клиентом, PostgreSQL application state,
-Redis Streams и отдельным inference worker. Генерация выполняется только через локальный или
-self-hosted OpenAI-compatible HTTP API. Коммерческие внешние LLM API не используются.
+Многопользовательский self-hosted ассистент для документации, Git-кода и метаданных PostgreSQL. Продукт включает защищённый Web UI, Telegram-клиент и HTTP API; immutable ingestion/index lifecycle; hybrid pgvector/full-text retrieval; multi-label routing; grounded citations; SQL AST/schema/EXPLAIN validation; scheduler, retention, audit и observability. Коммерческие LLM API не используются: generation, embeddings и optional reranking вызываются только как self-hosted HTTP endpoints.
 
-Реализованы два режима:
+## Архитектура
 
-- `direct` — совместимый диагностический путь, где API загружает текущий retriever;
-- `queued` — основной продуктовый путь: API сохраняет запрос в PostgreSQL, отправляет job в
-  Redis Streams, а retriever и model client живут в inference worker.
+PostgreSQL с pgvector — единственный system of record. Redis Streams используются только для доставки и coordination. API, inference/ingestion/indexing workers и scheduler — отдельные процессы модульного монолита; model services изолированы по HTTP. Web UI обслуживается Nginx. Tenant берётся только из authenticated principal, а composite constraints защищают ключевые связи в БД.
 
-Локальная аутентификация, tenant isolation, роли `admin`/`user`, API keys и audit log
-реализованы в Iteration 3. Website/Git connectors и отдельный incremental ingestion worker
-реализованы в Iteration 5. Управляемый PostgreSQL JDBC metadata connector добавлен в Iteration
-6. Web UI, scheduler, pgvector и multi-label retrieval пока не реализованы.
+Подробности: [целевая архитектура](docs/architecture/target-architecture.md), [runtime ADR](docs/decisions/ADR-010-final-product-runtime.md), [API](docs/api/inference-contracts.md), [threat model](docs/security/threat-model.md).
 
-Каталог поддерживает typed Website/Git/JDBC configs и immutable source versions с atomic
-activation/rollback. Website crawl, Git fetch/parse и PostgreSQL metadata introspection работают
-по on-demand refresh; embeddings, retrieval integration и scheduler пока не реализованы.
+## Быстрый локальный запуск
 
-## Реализованная runtime-схема
+Требуются Docker/Compose, 12 ГБ RAM для CPU embedding-профиля и нативный Ollama/llama.cpp для macOS. Модели не скачиваются при build или startup API.
 
-```text
-Telegram / HTTP client
-          |
-          v
-      FastAPI API ----------------> PostgreSQL 16 (system of record)
-          |                                |
-          +------ Redis Streams jobs ------+
-                    /              \
-                   v                v
-          inference worker       ingestion worker
-             |       |          /       |        \
-             v       v         v        v         v
-       retriever  model API  Website    Git    JDBC metadata
-                                               |
-                                               v
-                                  PostgreSQL content/version state
+```bash
+cp .env.example .env
+# замените только local-only placeholders; подготовьте qwen2.5-coder:7b в Ollama вручную
+docker compose up --build
+docker compose ps
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/ready
 ```
 
-Redis хранит delivery/events/heartbeat, но не является единственным хранилищем результата.
-Conversation, messages, jobs, answers и sources сохраняются в PostgreSQL. Token events имеют
-ограниченную retention и не записываются по одному в PostgreSQL.
+На macOS generation server остаётся нативным и доступен контейнерам по `host.docker.internal:11434`. Для нативного embedding endpoint используйте `-f compose.native-models.yml`; dev-порты БД/Redis включаются только через `-f compose.dev.yml`. Создание первого администратора:
 
-## Быстрый queued-запуск
+```bash
+read -s ADMIN_PASSWORD; export ADMIN_PASSWORD
+TENANT_SLUG=acme TENANT_NAME=Acme ADMIN_USERNAME=admin ADMIN_DISPLAY_NAME=Administrator make bootstrap-admin
+unset ADMIN_PASSWORD
+```
+
+Откройте `http://localhost:8080`, войдите, создайте knowledge base, source, выполните refresh/indexing и задайте вопрос. Полный проверочный путь: [owner acceptance](docs/testing/owner-acceptance.md).
+
+## Конфигурация и secrets
+
+`.env.example` содержит безопасные local defaults; `.env.production.example` — fail-closed production template. Обязательны PostgreSQL/Redis URLs, стойкий `JWT_SECRET`, HTTPS CORS origin, secure cookies и self-hosted model endpoints. Connector/API/model/S3/Telegram secrets передаются через environment, Docker/Kubernetes secrets или `CredentialResolver`; не сохраняются в Git, UI, audit и обычных logs. `AUTH_DISABLED=true` разрешён только в `dev/test`.
+
+Ключевые model variables: `MODEL_API_BASE_URL`, `GENERATION_MODEL`, `MODEL_API_TOKEN`, `EMBEDDING_API_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_TOKEN`, optional `RERANKER_API_BASE_URL`. Local generator ожидает OpenAI-compatible `/v1/chat/completions`, embedding service — `/v1/embeddings`.
+
+## Использование
+
+- Web UI: chat, resumable SSE, history/citations/feedback и tenant admin operations.
+- HTTP: `/ask`, `/ask/stream`, `/v1/inference-jobs/**`, `/v1/conversations/**`; OpenAPI — `/docs`.
+- Telegram: создайте API key со scopes `inference:read,inference:write`, передайте как `RAG_API_KEY`; бот вызывает API и не получает DB/model credentials.
+- Public: `/health`; sanitized `/ready`. `/metrics` и `/admin/runtime` должны быть доступны только из trusted network/reverse proxy; runtime endpoint дополнительно admin-only.
+
+## Разработка и тестирование
 
 ```bash
 make install
-cp .env.example .env
-make infra-up
-make migrate
-poetry run python -m app.state.bootstrap_admin \
-  --tenant-slug example \
-  --tenant-name "Example tenant" \
-  --username admin \
-  --display-name "Local administrator"
-make run-worker
-make run-ingestion-worker
-make run-api
-```
-
-Bootstrap-команда запрашивает пароль без отображения и не принимает его аргументом командной
-строки. Перед worker запустите Ollama нативно:
-
-```bash
-ollama serve
-ollama pull qwen2.5-coder:7b
-```
-
-Загрузка модели выполняется вручную и никогда не происходит при Docker build, import или
-unit tests.
-
-Проверка:
-
-```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/ready
-curl -X POST http://127.0.0.1:8000/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"tenant_slug":"example","username":"admin","password":"<password>"}'
-curl -X POST http://127.0.0.1:8000/ask \
-  -H "Authorization: Bearer <access-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"What is Apache Spark?"}'
-```
-
-`/health` проверяет только liveness API process. `/ready` в queued mode проверяет PostgreSQL,
-Redis и свежий worker heartbeat, включая retriever/model readiness. Отказ queued dependencies
-никогда не вызывает silent fallback в direct mode.
-
-## API
-
-Backward-compatible:
-
-- `GET /health`
-- `GET /ready`
-- `POST /ask`
-- `POST /ask/stream`
-
-Protected asynchronous API:
-
-- `POST /v1/inference-jobs`
-- `GET /v1/inference-jobs/{job_id}`
-- `GET /v1/inference-jobs/{job_id}/events`
-- `GET /v1/conversations/{conversation_id}`
-
-Authentication and administration:
-
-- `POST /v1/auth/login`, `/v1/auth/refresh`, `/v1/auth/logout`;
-- `GET /v1/auth/me`;
-- `GET|POST /v1/admin/users`;
-- `GET|PATCH|DELETE /v1/admin/users/{user_id}`;
-- `GET|POST /v1/api-keys`;
-- `DELETE /v1/api-keys/{key_id}`.
-
-Admin knowledge catalog:
-
-- `GET|POST /v1/admin/knowledge-bases`;
-- `GET|PATCH|DELETE /v1/admin/knowledge-bases/{id}`;
-- `GET|POST /v1/admin/knowledge-sources`;
-- `GET|PATCH|DELETE /v1/admin/knowledge-sources/{id}`;
-- knowledge base/source linking;
-- version and ingestion-run inspection;
-- on-demand source refresh, ingestion events/status and cancellation;
-- version activation and rollback.
-
-`POST /v1/admin/knowledge-sources/{id}/refresh` требует `Idempotency-Key` и создаёт durable
-ingestion run. Website connector соблюдает allowlist/limits и SSRF policy; Git connector делает
-изолированный fetch и фиксирует resolved commit SHA. JDBC refresh использует только managed
-`postgresql` driver registry entry, read-only system-catalog queries и строгие allowlists.
-
-`/health` and sanitized `/ready` remain public. `/admin/runtime` is admin-only. Jobs,
-conversations and SSE streams are filtered by authenticated tenant and user. Telegram and
-external clients use `X-API-Key`; its full value is displayed only once.
-
-`AskRequest` получил только optional `conversation_id`. `Idempotency-Key` поддерживается для
-`/ask`, `/ask/stream` и создания async job. Одинаковый key и payload возвращает существующий
-job; другой payload с тем же key получает HTTP 409.
-
-Queued SSE содержит:
-
-```text
-id: <redis-stream-id>
-event: queued|started|meta|token|retrying|completed|failed
-data: <versioned JSON contract>
-```
-
-`Last-Event-ID` возобновляет чтение. Legacy `/ask/stream` дополнительно сохраняет поля
-`type`/`data`; direct mode использует прежний SSE формат. Полный контракт описан в
-[`docs/api/inference-contracts.md`](docs/api/inference-contracts.md).
-
-## Application state и migrations
-
-PostgreSQL является локальным application database. Neon может быть отдельным JDBC metadata demo
-source и не должен использоваться как скрытая замена application database.
-
-```bash
-make migrate
-make seed-dev
-```
-
-Миграции не запускаются при import или API startup. Compatibility identity разрешена только
-при явном `AUTH_DISABLED=true` в `APP_ENV=dev|test`; production configuration fails closed.
-API не принимает доверенные `tenant_id`/`user_id` из request body.
-
-Source versions follow:
-
-```text
-discovered -> ingesting -> staged -> validating -> ready -> active -> superseded
-                         \-> failed    \---------> failed
-```
-
-Manifest and source objects become immutable after `staged`. Activation locks the source and
-atomically supersedes the previous active version. A database constraint allows only one
-active version per source.
-
-Normalized documents and chunks reference tenant-scoped content-addressed blobs. Unchanged
-content is reused between immutable versions. Run/version failures are sanitized together;
-failed and staging versions are not used by retrieval.
-
-## PostgreSQL/Neon metadata source
-
-Iteration 6 принимает PostgreSQL JDBC endpoint, но соединение выполняет предустановленный
-версионированный psycopg adapter. Загрузка JAR, Python module path и произвольных connection
-properties запрещена. Connector:
-
-- требует точные `host_allowlist`, `database_allowlist`, `catalog_allowlist` и
-  `schema_allowlist`;
-- требует `sslmode=verify-full`, проверяет публичный DNS и повторно не использует application
-  database credentials;
-- задаёт read-only transaction, connect/statement timeout и выполняет только фиксированные
-  metadata queries к `pg_catalog`;
-- сохраняет tables/views, columns/types/defaults/comments, PK/FK/unique constraints и indexes
-  как deterministic documents/chunks существующей immutable version.
-
-Для Neon владелец отдельно создаёт schema `rag_demo_source` и metadata-only/read-only role,
-после чего размещает username/password только в deployment environment или secret facility под
-именем `RAG_CREDENTIAL_<FIRST_16_SHA256_HEX>` для opaque reference
-`connection:neon-demo`. В source config сохраняются endpoint без user info, reference и
-allowlists. Полная безопасная форма config описана в
-[`docs/api/knowledge-catalog.md`](docs/api/knowledge-catalog.md). Репозиторий не создаёт Neon
-schema/user и в Iteration 6 не подключался к удалённой Neon database.
-
-## MacBook Air 24 GB profile
-
-Рекомендуемый профиль:
-
-- PostgreSQL, Redis и API — Docker/OrbStack;
-- Ollama — нативно на macOS для Metal;
-- worker — один процесс; нативно для MPS либо CPU Docker container;
-- ingestion worker — отдельный лёгкий process/container без ML dependencies;
-- одна generation model в памяти;
-- API в queued mode не импортирует и не загружает Sentence Transformer.
-
-Для native API/worker задайте host URLs:
-
-```env
-DATABASE_URL=postgresql+psycopg://rag:<local-password>@127.0.0.1:5432/rag
-REDIS_URL=redis://127.0.0.1:6379/0
-MODEL_API_BASE_URL=http://127.0.0.1:11434/v1
-```
-
-Compose API/worker используют `host.docker.internal`. API ограничен 512 MB, PostgreSQL —
-512 MB, Redis — 320 MB с `noeviction`, worker — 6 GB. Redis Streams ограничены maxlen/TTL.
-Worker монтирует `./artifacts` в `/app/artifacts` и использует активную версию retriever из
-`/app/artifacts/artifacts_rag_baseline_latest`.
-
-## Linux/CI CPU profile
-
-`infra/worker.Dockerfile` устанавливает один Poetry-resolved CPU-compatible ML stack без
-повторной установки Torch/Transformers. Linux worker явно выбирает `torch==2.9.0+cpu` из
-PyTorch CPU index; взаимно исключённые platform metadata в lock не устанавливаются в image.
-API image ставит только `api` group и не содержит Torch, Transformers, Sentence Transformers,
-Jupyter, research tooling или model weights.
-
-## Safe retriever artifacts
-
-S3 client создаётся лениво только при фактической загрузке. Download:
-
-1. проверяет полную конфигурацию и размер объекта;
-2. пишет во временную sibling staging directory;
-3. проверяет ZIP paths, traversal, absolute paths, symlinks и size limit;
-4. распаковывает вручную;
-5. выполняет required-files и smoke validation;
-6. атомарно заменяет active directory с rollback;
-7. удаляет только собственные staging/backup directories.
-
-Текущий corpus использует `joblib`; он должен загружаться только из управляемого доверенного
-artifact key. Полная замена pickle-compatible формата остаётся security debt.
-
-## Research
-
-Старые notebooks удалены. Новый контур находится в [`research/README.md`](research/README.md).
-Notebooks не содержат outputs/execution counts и используют reusable `research/src`. Heavy
-models и training opt-in; `RUN_TRAINING = False` по умолчанию. Результаты и weights ignored.
-
-## Основные environment variables
-
-| Variable | Purpose |
-| --- | --- |
-| `INFERENCE_EXECUTION_MODE` | `direct` или `queued` |
-| `DATABASE_URL` | локальный PostgreSQL application state |
-| `REDIS_URL` | Redis Streams transport |
-| `MODEL_API_BASE_URL` | self-hosted OpenAI-compatible base URL |
-| `GENERATION_MODEL` | generator model id |
-| `MODEL_API_TOKEN` | optional Bearer token |
-| `MODEL_READINESS_PATH` | лёгкий capability endpoint, default `/models` |
-| `INFERENCE_WAIT_TIMEOUT_SEC` | ожидание backward-compatible `/ask` |
-| `INFERENCE_MAX_ATTEMPTS` | bounded worker attempts |
-| `WORKER_ID` | стабильный worker identity |
-| `INGESTION_JOBS_STREAM` | отдельный Redis Stream ingestion jobs |
-| `INGESTION_WORKER_ID` | стабильный ingestion worker identity |
-| `INGESTION_LEASE_SEC` | lease для безопасного reclaim ingestion job |
-| `INGESTION_MAX_ATTEMPTS` | bounded ingestion attempts до DLQ |
-| `AUTH_DISABLED` | explicit dev/test compatibility mode |
-| `JWT_SECRET` | local JWT signing secret, минимум 32 символа |
-| `ACCESS_TOKEN_TTL_SEC` | lifetime короткоживущего access token |
-| `REFRESH_TOKEN_TTL_SEC` | lifetime rotating opaque refresh token |
-| `API_KEY_DEFAULT_TTL_SEC` | default lifetime API key |
-| `API_KEY` | Telegram credential для заголовка `X-API-Key` |
-| `LOGIN_RATE_LIMIT_PREFIX` | Redis key namespace for shared login throttling |
-| `RAG_CREDENTIAL_<REF_HASH>` | deployment-only connector credential JSON; never commit it |
-
-Остальные defaults и safe placeholders находятся в `.env.example`. Secrets не должны
-попадать в Git, docs, logs или Redis contracts.
-
-## Commands
-
-```bash
-make format-check
-make lint
-make test
-make infra-up
-make migrate
-make seed-dev
+make check
 make integration-test
-make smoke-test
-docker compose config --quiet
+make evaluation
+docker compose --env-file .env.example config --quiet
+helm lint deploy/helm/rag-assistant
 ```
 
-Backend-итерации до появления Web UI закрываются автоматическими и integration tests без
-обязательного ручного продуктового тестирования владельцем. API catalog contract:
-[Knowledge source catalog](docs/api/knowledge-catalog.md).
+Standard tests используют fake deterministic HTTP models/site/Git и не обращаются к Ollama, S3 или Neon. Real-model evaluation — только opt-in `RUN_REAL_MODEL_EVAL=1 make evaluation-real`. CI проверяет backend/frontend, migrations, security, images, SBOM и Helm. См. [testing guide](docs/testing/owner-acceptance.md) и [evaluation](docs/evaluation/report-template.md).
+
+## Production launch: от готового репозитория до работающего окружения
+
+Репозиторий предоставляет deployment artifacts и воспроизводимые проверки, но не утверждает, что ваше production-окружение уже развёрнуто.
+
+1. **Выберите topology.** Для одного Linux host используйте hardened Compose и внешний либо локальный pgvector/Redis. Для managed Kubernetes используйте Helm. Generation/embedding endpoints могут быть на том же GPU host либо выделенных узлах. Минимум для CPU smoke: 4 CPU/12 ГБ RAM/40 ГБ; рекомендуемо: 8 CPU/32 ГБ/100 ГБ; generation GPU: 12–16 ГБ VRAM для Qwen2.5-Coder-7B Q4, с запасом под concurrency. Подробности: [single host](docs/deployment/single-host.md), [Kubernetes](docs/deployment/kubernetes.md).
+2. **Подготовьте платформу.** Нужны Docker/Compose или Kubernetes/Helm, DNS, TLS, PostgreSQL 16+ с pgvector, Redis 7+ и заранее подготовленные self-hosted model weights. S3 нужен только при включённом read-only model cache; SMTP не используется.
+3. **DNS/TLS.** Создайте A/AAAA/CNAME на reverse proxy/Ingress, подключите существующий сертификат либо ACME/cert-manager, включите HTTPS redirect и renewal. Установите secure cookies, exact CORS origins и trusted proxy CIDRs. PostgreSQL/Redis не публикуйте в интернет.
+4. **Создайте secrets вне репозитория.** Сгенерируйте `JWT_SECRET` (`openssl rand -base64 48`), DB/Redis passwords; добавьте connector, Telegram, optional model/S3 credentials только в Docker/Kubernetes/External Secrets. Не помещайте значения в Git, image, Helm values, command history или logs. Порядок ротации: [secrets rotation](docs/operations/secrets-rotation.md).
+5. **Подготовьте PostgreSQL/Redis.** Создайте отдельную БД и least-privilege application user, включите `vector`, TLS и bounded pool. Выполните migrations отдельным one-shot job. Для Redis включите auth/TLS, AOF/RDB по требованиям, `noeviction`; Streams имеют bounded maxlen, а durable state остаётся в PostgreSQL. Neon demo JDBC source не является готовым production application DB profile.
+6. **Подготовьте модельное железо.** Заранее загрузите и проверьте Qwen2.5-Coder-7B и BGE-M3 на CPU, Apple MPS или NVIDIA CUDA host. Настройте OpenAI-compatible endpoints, health/readiness, token, concurrency/memory limits. API не скачивает weights. При outage readiness деградирует, новые jobs ограниченно retry и затем уходят в durable failed/DLQ state.
+7. **Заполните production configuration.** Скопируйте `.env.production.example` в защищённое secret/config хранилище, замените `.invalid`/`change-me`, установите `APP_ENV=production`, `AUTH_DISABLED=false`, HTTPS origins и service URLs. Проверьте `docker compose --env-file <protected-file> config` или `helm template`; приложение fail closed на слабом JWT, insecure cookie/CORS и disabled auth.
+8. **Single host.** Получите проверенный release/tag, создайте backup/model-cache volumes, установите secrets, запустите DB/Redis, затем migration job, model services и application services. Создайте первого tenant/admin через bootstrap command. Проверьте `/health`, `/ready`, Web UI, затем Website/Git ingestion → indexing → grounded chat и optional Telegram. Установите restart policy и host monitoring. Полные команды — в [single-host runbook](docs/deployment/single-host.md).
+9. **Kubernetes.** Создайте namespace, Secrets/ExternalSecrets и production values; проверьте Helm render. Запустите migration Job до Deployments, настройте Ingress/TLS/PVC, probes, resources, HPA/PDB и NetworkPolicies. Проверьте rollout/smoke; rollback выполняйте `helm rollback`, учитывая совместимость schema. См. [Kubernetes runbook](docs/deployment/kubernetes.md).
+10. **Backup/DR.** Делайте регулярный encrypted PostgreSQL backup и restore drills; сохраняйте manifests/configuration, но не считайте Redis backup источником истины. Active source/index versions восстанавливаются из PostgreSQL/content blobs; model cache можно загрузить заново с проверкой SHA-256. Владелец задаёт RPO/RTO. См. [backup/restore](docs/operations/backup-restore.md).
+11. **Monitoring.** Подключите `/metrics` к Prometheus и OTLP к collector. Импортируйте `deploy/observability/grafana-dashboard.json` и alerts. Контролируйте readiness, queue age/DLQ, failures, DB pool/disk и model outage; задайте log retention и регулярно проверяйте redaction prompts, retrieved content, auth headers и credentials.
+12. **Upgrade/rollback.** Перед schema change сделайте backup, прочитайте release notes, проверьте migration в staging, выполните migration job и rolling update. Application rollback возможен только при schema compatibility; DB downgrade выполняйте по runbook. Source/index/model/prompt versions переключаются атомарной activation/rollback операцией. См. [upgrade](docs/operations/upgrade-rollback.md).
+13. **Production acceptance checklist.** Используйте готовый [операторский checklist](docs/operations/production-checklist.md), включающий DNS/TLS, auth, secrets, pgvector/migrations, backup restore, readiness, tenant isolation, ingestion/indexing, citations, SQL, scheduler/retention, monitoring, DLQ и owner acceptance.
+14. **Ответственность.** Репозиторий создаёт API/workers/UI, migrations, Compose/Helm, security defaults, tests/SBOM и runbooks. Владелец предоставляет домен, policies, secrets, connector endpoints, Telegram token и model choice. Platform administrator создаёт network/TLS/managed DB/Redis/GPU, backups и alerts. Без реальных DNS/TLS, credentials, managed services и выбранного hardware невозможно подтвердить production rollout, certificate renewal, external backup restore и real-model capacity.
+
+## Backup, security и ограничения
+
+Операционные документы: [secrets](docs/operations/secrets-rotation.md), [backup](docs/operations/backup-restore.md), [DLQ/worker recovery](docs/operations/worker-recovery.md), [upgrade](docs/operations/upgrade-rollback.md), [retention](docs/operations/retention.md), [observability](docs/operations/observability.md).
+
+Поддерживаются статические HTML/sitemap, local Git и PostgreSQL metadata. JS-rendered crawling, дополнительные JDBC vendors и provider-specific infrastructure — optional extensions. SQL выполняется только как validated read-only `SELECT/WITH SELECT`; safe `EXPLAIN` требует отдельной read-only credential reference. Модель может ошибаться, поэтому citations и SQL validation должны оставаться видимыми пользователю.

@@ -1,0 +1,21 @@
+# Production acceptance checklist
+
+- [ ] DNS указывает на production endpoint
+- [ ] TLS действителен и автоматически обновляется
+- [ ] Dev/auth-disabled режим выключен
+- [ ] Все secrets находятся вне Git
+- [ ] PostgreSQL и Redis не опубликованы в интернет
+- [ ] pgvector установлен
+- [ ] Migrations достигли head
+- [ ] Backup и restore проверены
+- [ ] Все services healthy/ready
+- [ ] Model и embedding endpoints готовы
+- [ ] Первый admin создан безопасной bootstrap-командой
+- [ ] Tenant isolation smoke test пройден
+- [ ] Ingestion и indexing работают
+- [ ] Chat возвращает grounded answer с citations
+- [ ] SQL validation работает в read-only режиме
+- [ ] Scheduler и retention включены
+- [ ] Monitoring и alerts получают данные
+- [ ] DLQ и recovery procedure проверены
+- [ ] Owner acceptance scenario выполнен

@@ -5,7 +5,7 @@ Status: implemented for authenticated queued mode.
 ## Job contract `1.0`
 
 Redis job messages contain one Pydantic-validated JSON contract with job, tenant, user,
-conversation and message UUIDs, question, optional mode/top-k/token limit, creation timestamp,
+conversation, message and knowledge-base UUIDs, question, optional mode/top-k/token limit, creation timestamp,
 and correlation ID. Credentials are forbidden. Unknown versions are ACKed only after a
 sanitized DLQ entry is written.
 
@@ -27,12 +27,16 @@ sequence, job UUID, timestamp, correlation UUID, event type, and typed payload.
 Redis assigns the SSE resume ID. Clients reconnect with `Last-Event-ID`. Streams have
 configurable max length and TTL, so PostgreSQL—not Redis—remains the durable result source.
 
-## Compatibility
+## User and async surfaces
 
-Direct `/ask/stream` keeps the old `data: {"type": ..., "data": ...}` format. Queued
-`/ask/stream` adds SSE `id` and `event`, sends the complete v1 contract, and also includes
+Queued `/ask/stream` preserves the established `data: {"type": ..., "data": ...}` aliases,
+adds SSE `id` and `event`, sends the complete v1 contract, and includes
 legacy `type`/`data` aliases. `/v1/inference-jobs/{id}/events` emits only the versioned
 contract.
+
+`POST /v1/inference-jobs/{id}/cancel` requests safe cancellation and `.../retry` creates a new
+idempotent job for a terminal failed/cancelled request. `/ask` waits for the same queued job;
+there is no in-process direct generation path.
 
 All inference endpoints require either a JWT access token or a scoped API key. Tenant and user
 identifiers come exclusively from the authenticated principal. A client without credentials
