@@ -21,12 +21,10 @@ def upgrade() -> None:
         "users", sa.Column("is_active", sa.Boolean(), server_default=sa.true(), nullable=False)
     )
     op.add_column("users", sa.Column("last_login_at", sa.DateTime(timezone=True)))
-    op.execute(
-        """
+    op.execute("""
         UPDATE users
         SET username = COALESCE(NULLIF(external_id, ''), 'user-' || substring(id::text, 1, 12))
-        """
-    )
+        """)
     op.alter_column("users", "username", nullable=False)
     op.create_unique_constraint("uq_users_tenant_username", "users", ["tenant_id", "username"])
 
@@ -34,15 +32,13 @@ def upgrade() -> None:
         "conversations",
         sa.Column("next_message_sequence", sa.Integer(), server_default="1", nullable=False),
     )
-    op.execute(
-        """
+    op.execute("""
         UPDATE conversations AS c
         SET next_message_sequence = COALESCE(
             (SELECT MAX(m.sequence_number) + 1 FROM messages AS m WHERE m.conversation_id = c.id),
             1
         )
-        """
-    )
+        """)
 
     op.add_column("inference_jobs", sa.Column("lease_owner", sa.String(255)))
     op.add_column("inference_jobs", sa.Column("lease_token", sa.Uuid()))

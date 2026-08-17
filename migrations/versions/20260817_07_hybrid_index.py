@@ -18,13 +18,11 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    op.execute(
-        """
+    op.execute("""
         UPDATE jdbc_driver_registry
         SET manifest_checksum = 'f9a977f43ffd5fa678871b0b563c76613ba9ab70fb3ca6480b138df47e5ed1b1'
         WHERE driver_id = 'postgresql' AND registry_version = '1'
-        """
-    )
+        """)
     embedding_models = op.create_table(
         "embedding_model_versions",
         sa.Column("id", sa.Uuid(), nullable=False),

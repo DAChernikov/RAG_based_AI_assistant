@@ -37,7 +37,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install poetry==2.1.4
-      - run: poetry install --with bot,dev
+      # Standard tests use deterministic fake embedding HTTP services; model libraries are
+      # verified by the embedding image build and are not loaded in this job.
+      - run: poetry install --only api,bot,dev,research,artifacts
       - run: poetry check --lock
       - run: poetry run black --check app tests migrations research/src
       - run: poetry run ruff check app tests migrations research/src
