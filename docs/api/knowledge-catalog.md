@@ -21,6 +21,7 @@ All paths require an authenticated `admin`. Tenant identity comes from the princ
 - `POST /v1/admin/knowledge-sources/{source_id}/refresh`
 - `POST /v1/admin/knowledge-sources/{source_id}/versions/{version_id}/activate`
 - `POST /v1/admin/knowledge-sources/{source_id}/versions/{version_id}/rollback`
+- `PUT /v1/admin/knowledge-sources/{source_id}/versions/{version_id}/pin`
 - `GET /v1/admin/ingestion-runs/{run_id}`
 - `GET /v1/admin/ingestion-runs/{run_id}/events`
 - `POST /v1/admin/ingestion-runs/{run_id}/cancel`
@@ -94,6 +95,10 @@ discover -> incremental diff -> fetch/parse/chunk
 Any processing error marks both the source version and ingestion run failed with a sanitized
 message. Failed and staging versions are not retrieval-visible. Retrieval integration itself is
 through the linked knowledge-base indexing lifecycle.
+
+Activation and rollback are serialized in PostgreSQL. Active and explicitly pinned versions are
+retention-protected. The Web UI exposes refresh status/events, cancel, activate, rollback and pin;
+operators do not need to construct JSON requests manually.
 
 ## Credential resolution
 
