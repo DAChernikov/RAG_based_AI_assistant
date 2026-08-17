@@ -1,5 +1,6 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { api, Citation, Conversation, KnowledgeBase, Principal } from './api'
+import { Admin } from './Admin'
 
 type Message = { role: 'user' | 'assistant'; text: string; citations?: Citation[]; details?: unknown; answerId?: string }
 
@@ -82,32 +83,6 @@ function Chat() {
     {error && <p className="error" role="alert">{error}</p>}
     <form className="composer" onSubmit={ask}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} maxLength={10000} placeholder="Спросите о документации, коде или данных…" aria-label="Вопрос"/><div><button type="button" className="secondary" onClick={() => void cancel()}>Отменить</button><button disabled={!base}>Отправить</button></div></form>
   </section>
-}
-
-const resources = [
-  ['Пользователи', '/v1/admin/users'], ['API keys', '/v1/api-keys'],
-  ['Базы знаний', '/v1/admin/knowledge-bases'], ['Источники', '/v1/admin/knowledge-sources'],
-  ['Indexing runs', '/v1/admin/indexing-runs'], ['Расписания', '/v1/admin/schedules'],
-  ['Модели', '/v1/admin/models'], ['Prompts', '/v1/admin/prompts'],
-  ['Audit log', '/v1/admin/audit-events'],
-] as const
-
-function Admin() {
-  const [path, setPath] = useState<string>(resources[0][1]); const [rows, setRows] = useState<unknown[]>([]); const [error, setError] = useState('')
-  const load = useCallback(async () => { try { setRows(await api.list<unknown>(path)); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : 'Ошибка') } }, [path])
-  useEffect(() => { void load() }, [load])
-  return <section className="workspace admin"><header><div><p className="eyebrow">TENANT CONTROL</p><h2>Администрирование</h2></div><button className="secondary" onClick={load}>Обновить</button></header>
-    <nav className="tabs" aria-label="Административные разделы">{resources.map(([label, value]) => <button className={path === value ? 'active' : 'secondary'} key={value} onClick={() => setPath(value)}>{label}</button>)}</nav>
-    {error && <p className="error">{error}</p>}<div className="data-list">{rows.length === 0 ? <p className="empty">Нет записей</p> : rows.map((row, i) => <article className="card" key={i}><pre>{JSON.stringify(row, null, 2)}</pre></article>)}</div>
-    <details className="card"><summary>Операторская мутация</summary><p className="muted">Dangerous actions require confirmation. Secrets are never rendered after creation.</p><OperatorForm path={path} onDone={load}/></details>
-  </section>
-}
-
-function OperatorForm({ path, onDone }: { path: string; onDone: () => void }) {
-  const [body, setBody] = useState('{}'); const [error, setError] = useState('')
-  async function submit(event: FormEvent) { event.preventDefault(); if (!confirm('Подтвердить операцию?')) return
-    try { await api.mutate(path, 'POST', JSON.parse(body), crypto.randomUUID()); setError(''); onDone() } catch (reason) { setError(reason instanceof Error ? reason.message : 'Ошибка') } }
-  return <form onSubmit={submit}><label>JSON contract<textarea value={body} onChange={(e) => setBody(e.target.value)} spellCheck={false}/></label>{error && <p className="error">{error}</p>}<button>Выполнить</button></form>
 }
 
 export function App() {

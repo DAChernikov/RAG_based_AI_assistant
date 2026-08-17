@@ -5,6 +5,17 @@ export type AskResult = { question: string; answer: string; mode: string; confid
 export type Conversation = { conversation_id: string; title?: string; updated_at: string }
 export type ConversationDetail = { conversation_id: string; title?: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> }
 export type JobStatus = { job_id: string; conversation_id: string; status: string; answer?: { answer_id: string } }
+export type User = { id: string; username: string; display_name: string; role: 'admin' | 'user'; is_active: boolean; created_at: string }
+export type ApiKey = { id: string; name: string; prefix: string; scopes: string[]; expires_at?: string; last_used_at?: string; revoked_at?: string; api_key?: string }
+export type Source = { id: string; name: string; source_type: 'website' | 'git' | 'jdbc'; config: Record<string, unknown>; is_enabled: boolean }
+export type SourceVersion = { id: string; source_id: string; version_number: number; status: string; pinned: boolean; created_at: string }
+export type IngestionRun = { id: string; source_id: string; source_version_id: string; status: string; attempt_count: number; error_message?: string }
+export type IndexingRun = { id: string; knowledge_base_id: string; index_version_id: string; status: string; attempt_count: number; checkpoint: Record<string, unknown>; cancel_requested: boolean }
+export type IndexVersion = { id: string; knowledge_base_id: string; version_number: number; status: string; pinned: boolean; manifest: Record<string, unknown> }
+export type Schedule = { id: string; source_id: string; interval_seconds: number; is_enabled: boolean; next_run_at: string; last_run_at?: string }
+export type ModelDefinition = { id: string; role: 'generation' | 'embedding' | 'reranker'; model_id: string; version: string; endpoint_ref: string; capabilities: Record<string, unknown>; is_active: boolean }
+export type PromptTemplate = { id: string; name: string; version: string; checksum: string; is_active: boolean }
+export type AuditEvent = { id: string; actor_user_id?: string; action: string; resource_type?: string; resource_id?: string; outcome: string; correlation_id: string; created_at: string }
 
 function cookie(name: string): string | undefined {
   return document.cookie.split('; ').find((row) => row.startsWith(`${name}=`))?.split('=')[1]
