@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-INGESTION_CONTRACT_VERSION = "1.0"
+INGESTION_CONTRACT_VERSION: Literal["1.0"] = "1.0"
 
 
 class IngestionJobContract(BaseModel):

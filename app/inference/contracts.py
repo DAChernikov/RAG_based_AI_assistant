@@ -6,8 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-JOB_CONTRACT_VERSION = "1.0"
-EVENT_CONTRACT_VERSION = "1.0"
+JOB_CONTRACT_VERSION: Literal["1.0"] = "1.0"
+EVENT_CONTRACT_VERSION: Literal["1.0"] = "1.0"
 
 
 class UnsupportedContractVersion(ValueError):
@@ -21,6 +21,7 @@ class InferenceJobContract(BaseModel):
     user_id: uuid.UUID
     conversation_id: uuid.UUID
     message_id: uuid.UUID
+    knowledge_base_id: uuid.UUID
     question: str = Field(min_length=1)
     requested_mode: str | None = None
     top_k: int | None = Field(default=None, ge=1, le=50)
@@ -118,7 +119,7 @@ InferenceEvent = Annotated[
     | RetryingEvent,
     Field(discriminator="event_type"),
 ]
-EVENT_ADAPTER = TypeAdapter(InferenceEvent)
+EVENT_ADAPTER: TypeAdapter[InferenceEvent] = TypeAdapter(InferenceEvent)
 
 
 def parse_job_contract(raw: str | bytes) -> InferenceJobContract:

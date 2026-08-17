@@ -238,3 +238,35 @@ def test_audit_metadata_excludes_secrets(auth_context):
         event = session.scalar(select(AuditEvent).where(AuditEvent.action == "test"))
         assert event.metadata_json == {"safe": "value"}
         assert session.scalar(select(RefreshSession).limit(1)) is None
+
+
+def test_browser_cookie_session_requires_csrf_and_rotates(auth_context):
+    client, _ = build_auth_client(auth_context)
+    login = client.post(
+        "/v1/auth/login",
+        json={
+            "tenant_slug": "tenant-a",
+            "username": "alice",
+            "password": "alice-password-123",
+            "use_cookie": True,
+        },
+    )
+    assert login.status_code == 200
+    assert login.json()["refresh_token"] is None
+    assert "HttpOnly" in login.headers["set-cookie"]
+    assert client.post("/v1/auth/refresh", json={}).status_code == 403
+
+    csrf = client.cookies.get("rag_csrf")
+    refresh = client.post(
+        "/v1/auth/refresh",
+        json={},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert refresh.status_code == 200
+    assert refresh.json()["refresh_token"] is None
+    logout = client.post(
+        "/v1/auth/logout",
+        json={},
+        headers={"X-CSRF-Token": client.cookies.get("rag_csrf")},
+    )
+    assert logout.status_code == 204

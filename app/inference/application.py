@@ -22,6 +22,7 @@ def serialize_job(job) -> dict[str, Any]:
     sources: list[dict] = []
     if job.answer is not None:
         answer = {
+            "answer_id": str(job.answer.id),
             "answer": job.answer.answer_text,
             "mode": job.answer.mode,
             "confidence": job.answer.confidence,
@@ -46,6 +47,7 @@ def serialize_job(job) -> dict[str, Any]:
         "contract_version": job.contract_version,
         "attempt_count": job.attempt_count,
         "max_attempts": job.max_attempts,
+        "cancel_requested": job.cancel_requested,
         "queued_at": job.queued_at,
         "started_at": job.started_at,
         "completed_at": job.completed_at,
@@ -78,6 +80,7 @@ class QueuedInferenceApplication:
             "top_k": payload.get("top_k"),
             "max_new_tokens": payload.get("max_new_tokens"),
             "conversation_id": str(conversation_id) if conversation_id else None,
+            "knowledge_base_id": str(payload["knowledge_base_id"]),
         }
         creation = await _resolve(
             self.repository.create_job(
@@ -97,6 +100,7 @@ class QueuedInferenceApplication:
             user_id=user_id,
             conversation_id=creation.job.conversation_id,
             message_id=creation.job.user_message_id,
+            knowledge_base_id=payload["knowledge_base_id"],
             question=payload["question"],
             requested_mode=payload.get("mode"),
             top_k=payload.get("top_k"),
@@ -125,6 +129,7 @@ class QueuedInferenceApplication:
             if job is not None and job.status in {
                 JobStatus.COMPLETED.value,
                 JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
             }:
                 return job
             await asyncio.sleep(settings.inference_poll_interval_sec)

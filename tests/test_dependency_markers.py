@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_torch_sources_are_platform_exclusive_and_cpu_only_on_linux():
     with (ROOT / "pyproject.toml").open("rb") as source:
         project = tomllib.load(source)
-    torch_entries = project["tool"]["poetry"]["group"]["worker"]["dependencies"]["torch"]
+    torch_entries = project["tool"]["poetry"]["group"]["embedding"]["dependencies"]["torch"]
     assert len(torch_entries) == 2
     by_source = {entry["source"]: entry for entry in torch_entries}
     assert by_source["PyPI"]["version"] == "2.9.0"

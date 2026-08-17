@@ -13,6 +13,12 @@ class APIClient:
     def __init__(self):
         self.base_url = bot_settings.api_base_url.rstrip("/")
         self.timeout = bot_settings.request_timeout
+        self.stream_timeout = httpx.Timeout(
+            connect=bot_settings.stream_connect_timeout,
+            read=bot_settings.stream_read_timeout,
+            write=bot_settings.stream_write_timeout,
+            pool=bot_settings.stream_pool_timeout,
+        )
 
     @property
     def headers(self) -> dict[str, str]:
@@ -47,7 +53,7 @@ class APIClient:
         if top_k is not None:
             payload["top_k"] = top_k
 
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=self.stream_timeout) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/ask/stream",

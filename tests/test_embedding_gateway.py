@@ -1,0 +1,93 @@
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from app.embedding_service.main import EmbeddingSettings, create_app
+from app.embeddings.client import EmbeddingClient, EmbeddingServiceError
+
+
+class FakeBackend:
+    def __init__(self):
+        self.calls = []
+        self.closed = False
+
+    async def encode(self, texts):
+        self.calls.append(texts)
+        return [[0.6, 0.8] for _ in texts]
+
+    async def close(self):
+        self.closed = True
+
+
+def test_embedding_service_contract_batch_limits_and_shutdown():
+    backend = FakeBackend()
+    settings = EmbeddingSettings(
+        embedding_dimensions=2,
+        embedding_max_batch=2,
+        embedding_max_text_chars=20,
+    )
+    with TestClient(create_app(backend, settings)) as client:
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "BAAI/bge-m3", "input": ["one", "two"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["contract_version"] == "1.0"
+        assert response.json()["model_version"] == "bge-m3/1"
+        assert response.json()["data"][1]["embedding"] == [0.6, 0.8]
+        assert (
+            client.post("/v1/embeddings", json={"model": "wrong", "input": "one"}).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                "/v1/embeddings", json={"model": "BAAI/bge-m3", "input": ["a", "b", "c"]}
+            ).status_code
+            == 422
+        )
+    assert backend.closed is True
+
+
+@pytest.mark.asyncio
+async def test_embedding_client_retries_temporary_failure_and_omits_token():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"data": [{"index": 0, "embedding": [1, 0]}]},
+        )
+
+    client = EmbeddingClient(
+        "http://embedding.test/v1",
+        "BAAI/bge-m3",
+        transport=httpx.MockTransport(handler),
+        retries=1,
+        retry_backoff_sec=0,
+    )
+    assert await client.embed(["query"]) == [[1.0, 0.0]]
+    assert len(requests) == 2
+    assert all("authorization" not in request.headers for request in requests)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_embedding_client_token_and_malformed_response():
+    def handler(request):
+        assert request.headers["authorization"] == "Bearer local-token"
+        return httpx.Response(200, request=request, json={"data": []})
+
+    client = EmbeddingClient(
+        "http://embedding.test/v1",
+        "BAAI/bge-m3",
+        token="local-token",
+        transport=httpx.MockTransport(handler),
+        retries=0,
+    )
+    with pytest.raises(EmbeddingServiceError):
+        await client.embed(["query"])
+    await client.close()

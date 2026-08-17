@@ -6,11 +6,14 @@ import uuid
 import psycopg
 import pytest
 from psycopg import sql
+from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
 
 from app.catalog.configs import JDBCSourceConfig
 from app.connectors.base import CredentialMaterial, CredentialResolver, PreviousObject
 from app.connectors.jdbc import JDBCMetadataConnector
+from app.connectors.jdbc_registry import ManagedDriverRegistry
 
 pytestmark = pytest.mark.integration
 
@@ -22,8 +25,9 @@ class IntegrationCredentialResolver(CredentialResolver):
         )
 
 
-async def allow_local_integration_host(_host: str) -> None:
-    return None
+async def allow_local_integration_host(_host: str) -> tuple[str, ...]:
+    # Explicit test-only pin; production validator rejects private addresses.
+    return ("127.0.0.1",)
 
 
 @pytest.mark.asyncio
@@ -89,6 +93,9 @@ async def test_postgresql_metadata_connector_reads_catalogs_without_user_rows():
     )
     connector = JDBCMetadataConnector(
         IntegrationCredentialResolver(),
+        registry=ManagedDriverRegistry(
+            sessionmaker(bind=create_engine(database_url), expire_on_commit=False)
+        ),
         connection_factory=local_connection_factory,
         host_validator=allow_local_integration_host,
     )

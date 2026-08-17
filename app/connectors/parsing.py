@@ -24,7 +24,7 @@ def _chunk(text: str, index: int, **metadata: Any) -> ParsedChunk:
 
 def parse_markdown(text: str) -> tuple[ParsedChunk, ...]:
     lines = text.splitlines()
-    chunks = []
+    chunks: list[ParsedChunk] = []
     start = 1
     heading = None
     buffer: list[str] = []
@@ -55,7 +55,7 @@ def parse_python(text: str) -> tuple[ParsedChunk, ...]:
         tree = ast.parse(text)
     except SyntaxError:
         return (_chunk(text, 0, line_start=1, line_end=max(1, len(lines))),)
-    chunks = []
+    chunks: list[ParsedChunk] = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             end = getattr(node, "end_lineno", node.lineno)
@@ -74,7 +74,7 @@ def parse_python(text: str) -> tuple[ParsedChunk, ...]:
 
 
 def parse_sql(text: str) -> tuple[ParsedChunk, ...]:
-    chunks = []
+    chunks: list[ParsedChunk] = []
     cursor = 1
     for statement in filter(None, (item.strip() for item in text.split(";"))):
         line_count = statement.count("\n") + 1
@@ -104,7 +104,7 @@ def parse_jvm(text: str) -> tuple[ParsedChunk, ...]:
     )
     if not matches:
         return (_chunk(text, 0, line_start=1, line_end=max(1, len(lines))),)
-    chunks = []
+    chunks: list[ParsedChunk] = []
     for index, match in enumerate(matches):
         start = text[: match.start()].count("\n") + 1
         end_offset = matches[index + 1].start() if index + 1 < len(matches) else len(text)
@@ -135,7 +135,7 @@ def parse_structured(text: str, language: str) -> tuple[ParsedChunk, ...]:
         except json.JSONDecodeError:
             pass
     lines = text.splitlines()
-    chunks = []
+    chunks: list[ParsedChunk] = []
     for number, line in enumerate(lines, start=1):
         match = re.match(r"^([A-Za-z0-9_.-]+):\s*", line)
         if match:

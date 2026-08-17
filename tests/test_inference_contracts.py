@@ -20,6 +20,7 @@ def test_job_contract_round_trip():
         user_id=uuid.uuid4(),
         conversation_id=uuid.uuid4(),
         message_id=uuid.uuid4(),
+        knowledge_base_id=uuid.uuid4(),
         question="What is Spark?",
     )
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -15,6 +14,7 @@ from app.auth.security import (
     generate_refresh_token,
     secret_hash,
 )
+from app.concurrency import api_blocking_io
 from app.state.auth_repository import AuthRepository
 
 ALL_INFERENCE_SCOPES = frozenset({"profile:read", "inference:read", "inference:write"})
@@ -33,7 +33,7 @@ class AuthService:
         self.rate_limiter = rate_limiter
 
     async def _call(self, method, *args, **kwargs):
-        return await asyncio.to_thread(method, *args, **kwargs)
+        return await api_blocking_io.call(method, *args, **kwargs)
 
     def principal_for_user(self, user, method: str = "jwt") -> Principal:
         return Principal(

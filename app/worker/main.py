@@ -31,7 +31,7 @@ from app.inference.redis_queue import RedisInferenceQueue
 from app.observability import log_event, metric
 from app.state.database import create_database_engine, create_session_factory
 from app.state.models import JobStatus
-from app.state.repositories import ApplicationRepository
+from app.state.repositories import ApplicationRepository, JobCancelledError
 from app.worker.processor import InferenceProcessor
 
 
@@ -116,11 +116,37 @@ class InferenceWorker:
             )
             await self.queue.ack(message_id)
             return
+        if job.status == JobStatus.CANCELLED.value or job.cancel_requested:
+            await self._event(
+                contract,
+                "failed",
+                {"error_code": "cancelled", "message": "Inference job was cancelled."},
+            )
+            await self.queue.ack(message_id)
+            return
 
         claimed = self.repository.claim_job(
             contract.job_id, self.worker_id, settings.worker_lease_sec
         )
         if claimed is None:
+            exhausted = self.repository.fail_exhausted_job(contract.job_id)
+            if exhausted:
+                await self._event(
+                    contract,
+                    "failed",
+                    {
+                        "error_code": "retry_exhausted",
+                        "message": "Inference retry budget was exhausted.",
+                    },
+                )
+                await self.queue.send_to_dlq(
+                    message_id=message_id,
+                    job_id=str(contract.job_id),
+                    correlation_id=str(contract.correlation_id),
+                    error_code="retry_exhausted",
+                    message="Inference retry budget was exhausted.",
+                )
+                await self.queue.ack(message_id)
             return
         running, lease_token = claimed
         await self._event(
@@ -165,12 +191,14 @@ class InferenceWorker:
             current = self.repository.get_job(contract.job_id)
             if current.attempt_count < current.max_attempts:
                 code = "temporary_inference_error"
-                self.repository.mark_retry(
+                retried = self.repository.mark_retry(
                     contract.job_id,
                     code,
                     "Temporary inference failure.",
                     lease_token,
                 )
+                if not retried:
+                    return
                 await self._event(
                     contract,
                     "retrying",
@@ -186,7 +214,25 @@ class InferenceWorker:
                 metric("retries")
             else:
                 await self._terminal_failure(message_id, contract, "retry_exhausted", lease_token)
-        except Exception:
+        except JobCancelledError:
+            self.repository.mark_cancelled(contract.job_id, lease_token)
+            await self._event(
+                contract,
+                "failed",
+                {"error_code": "cancelled", "message": "Inference job was cancelled."},
+            )
+            await self.queue.ack(message_id)
+        except asyncio.CancelledError:
+            log_event("job_cancelled", job_id=contract.job_id, worker_id=self.worker_id)
+            raise
+        except Exception as exc:
+            log_event(
+                "job_failed",
+                job_id=contract.job_id,
+                correlation_id=contract.correlation_id,
+                worker_id=self.worker_id,
+                error_type=type(exc).__name__,
+            )
             await self._terminal_failure(message_id, contract, "inference_failed", lease_token)
         finally:
             lease_task.cancel()
@@ -208,7 +254,8 @@ class InferenceWorker:
 
     async def _terminal_failure(self, message_id, contract, code: str, lease_token=None) -> None:
         message = "Inference job failed. See worker logs using the correlation ID."
-        self.repository.mark_failed(contract.job_id, code, message, lease_token)
+        if not self.repository.mark_failed(contract.job_id, code, message, lease_token):
+            return
         await self._event(
             contract,
             "failed",
@@ -266,15 +313,18 @@ class InferenceWorker:
                     await self.process_message(message_id, fields)
         finally:
             self.stop_event.set()
-            await heartbeat
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
             await self.processor.close()
             await self.queue.close()
 
 
 async def async_main() -> None:
     engine = create_database_engine()
-    repository = ApplicationRepository(create_session_factory(engine))
-    worker = InferenceWorker(repository, RedisInferenceQueue(), InferenceProcessor())
+    session_factory = create_session_factory(engine)
+    repository = ApplicationRepository(session_factory)
+    worker = InferenceWorker(repository, RedisInferenceQueue(), InferenceProcessor(session_factory))
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signal_name, worker.stop_event.set)

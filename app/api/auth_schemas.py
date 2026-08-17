@@ -8,10 +8,11 @@ class LoginRequest(BaseModel):
     tenant_slug: str = Field(min_length=1, max_length=100)
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=500)
+    use_cookie: bool = False
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str = Field(min_length=20, max_length=500)
+    refresh_token: str | None = Field(default=None, min_length=20, max_length=500)
 
 
 class LogoutRequest(RefreshRequest):
@@ -21,7 +22,7 @@ class LogoutRequest(RefreshRequest):
 class TokenPairResponse(BaseModel):
     access_token: str
     access_expires_at: datetime
-    refresh_token: str
+    refresh_token: str | None
     refresh_expires_at: datetime
     token_type: str
 

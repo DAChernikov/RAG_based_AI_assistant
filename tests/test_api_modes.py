@@ -10,16 +10,6 @@ from app.auth.security import Principal
 from app.inference.contracts import InferenceJobContract
 
 
-class FakeRAG:
-    async def ask(self, **kwargs):
-        return {
-            "answer": "direct answer",
-            "mode": "rag_docs",
-            "confidence": None,
-            "retrieved": [],
-        }
-
-
 def build_client(runtime):
     app = FastAPI()
     app.include_router(ask.router)
@@ -36,16 +26,6 @@ def build_client(runtime):
     return TestClient(app)
 
 
-def test_ask_direct_mode_is_backward_compatible():
-    client = build_client({"execution_mode": "direct", "rag_service": FakeRAG()})
-
-    response = client.post("/ask", json={"question": "What is Spark?"})
-
-    assert response.status_code == 200
-    assert response.json()["answer"] == "direct answer"
-    assert response.json()["mode"] == "rag_docs"
-
-
 class FakeQueuedApplication:
     def __init__(self):
         self.job_id = uuid.uuid4()
@@ -56,6 +36,7 @@ class FakeQueuedApplication:
             user_id=uuid.uuid4(),
             conversation_id=self.conversation_id,
             message_id=uuid.uuid4(),
+            knowledge_base_id=uuid.uuid4(),
             question="queued",
         )
         self.job = SimpleNamespace(
@@ -86,9 +67,22 @@ class FakeQueuedApplication:
         return SimpleNamespace(status="completed", answer=answer)
 
 
+class FakeHybridRetriever:
+    async def resolve_knowledge_base(self, tenant_id, requested_id):
+        return requested_id or uuid.uuid4()
+
+
+def queued_runtime(application):
+    return {
+        "execution_mode": "queued",
+        "queued_application": application,
+        "hybrid_retriever": FakeHybridRetriever(),
+    }
+
+
 def test_ask_queued_mode_preserves_response_and_exposes_job_headers():
     application = FakeQueuedApplication()
-    client = build_client({"execution_mode": "queued", "queued_application": application})
+    client = build_client(queued_runtime(application))
 
     response = client.post(
         "/ask",
@@ -104,7 +98,7 @@ def test_ask_queued_mode_preserves_response_and_exposes_job_headers():
 
 def test_async_job_endpoint_returns_202_and_urls():
     application = FakeQueuedApplication()
-    client = build_client({"execution_mode": "queued", "queued_application": application})
+    client = build_client(queued_runtime(application))
 
     response = client.post("/v1/inference-jobs", json={"question": "queued"})
 

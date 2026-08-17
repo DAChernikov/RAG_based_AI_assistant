@@ -195,7 +195,6 @@ def _jdbc_config(**overrides):
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"driver_id": "uploaded-jar"},
         {"jdbc_url": "jdbc:postgresql://other.example.test/demo?sslmode=verify-full"},
         {"jdbc_url": "jdbc:postgresql://db.example.test/other?sslmode=verify-full"},
         {"jdbc_url": "jdbc:postgresql://db.example.test/demo?sslmode=require"},
@@ -209,3 +208,8 @@ def _jdbc_config(**overrides):
 def test_jdbc_config_enforces_registry_target_allowlists_and_tls(overrides):
     with pytest.raises(ValidationError):
         parse_source_config(_jdbc_config(**overrides))
+
+
+def test_jdbc_driver_selection_is_deferred_to_database_registry():
+    config = parse_source_config(_jdbc_config(driver_id="reviewed-vendor-driver"))
+    assert config.driver_id == "reviewed-vendor-driver"

@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 
 from app.api.auth_schemas import UserCreateRequest, UserResponse, UserUpdateRequest
@@ -24,13 +24,15 @@ def _response(user):
 
 @router.get("", response_model=list[UserResponse])
 async def list_users(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
     users = await runtime["auth_service"]._call(
         runtime["auth_repository"].list_users, principal.tenant_id
     )
-    return [_response(user) for user in users]
+    return [_response(user) for user in users[offset : offset + limit]]
 
 
 @router.get("/{user_id}", response_model=UserResponse)

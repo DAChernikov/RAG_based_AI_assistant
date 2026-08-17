@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class AskRequest(BaseModel):
@@ -10,6 +10,7 @@ class AskRequest(BaseModel):
     max_new_tokens: int | None = Field(default=None, ge=1, le=4096)
     mode: str | None = Field(default=None, description="Routing mode: rag or sql")
     conversation_id: uuid.UUID | None = None
+    knowledge_base_id: uuid.UUID | None = None
 
 
 class RetrievedDocument(BaseModel):
@@ -17,6 +18,8 @@ class RetrievedDocument(BaseModel):
     source: str
     score: float
     title: str | None = None
+    uri: str | None = None
+    metadata: dict = Field(default_factory=dict)
 
 
 class AskResponse(BaseModel):
@@ -33,19 +36,9 @@ class HealthResponse(BaseModel):
 
 
 class ReadyResponse(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
     status: str
-    artifacts_ready: bool
-    rag_ready: bool
-    startup_error: str | None = None
-    execution_mode: str = "direct"
-    model_ready: bool | None = None
-    model_status: str | None = None
-    database_ready: bool | None = None
-    redis_ready: bool | None = None
-    worker_ready: bool | None = None
-    worker_heartbeat_age_sec: float | None = None
+    execution_mode: str = "queued"
+    components: dict[str, str] = Field(default_factory=dict)
 
 
 class InferenceJobAccepted(BaseModel):

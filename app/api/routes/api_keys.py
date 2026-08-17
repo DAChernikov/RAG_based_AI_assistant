@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.auth_schemas import APIKeyCreatedResponse, APIKeyCreateRequest, APIKeyResponse
 from app.api.dependencies import get_principal, get_runtime_state
@@ -61,12 +61,14 @@ async def create_api_key(
 
 @router.get("", response_model=list[APIKeyResponse])
 async def list_api_keys(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(get_principal),
     runtime=Depends(get_runtime_state),
 ):
     _require_session(principal)
     items = await runtime["auth_service"]._call(runtime["auth_repository"].list_api_keys, principal)
-    return [_response(item) for item in items]
+    return [_response(item) for item in items[offset : offset + limit]]
 
 
 @router.delete("/{key_id}", status_code=204)

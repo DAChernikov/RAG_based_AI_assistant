@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Awaitable, Callable
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
-from xml.etree import ElementTree
 
 import httpx
+from defusedxml import ElementTree
+from defusedxml.common import DefusedXmlException
 
 from app.catalog.configs import WebsiteSourceConfig
 from app.connectors.base import (
@@ -43,6 +44,7 @@ _BLOCK_TAGS = {
     *(f"h{i}" for i in range(1, 7)),
 }
 _BINARY_CONTENT_PREFIXES = ("image/", "audio/", "video/", "application/octet-stream")
+_MAX_SITEMAP_ELEMENTS = 10_000
 
 
 @dataclass
@@ -342,9 +344,11 @@ class WebsiteConnector:
                 if content_type in {"application/xml", "text/xml"} or url.endswith("sitemap.xml"):
                     try:
                         root = ElementTree.fromstring(body)
-                    except ElementTree.ParseError:
+                    except (ElementTree.ParseError, DefusedXmlException):
                         continue
-                    for element in root.iter():
+                    for index, element in enumerate(root.iter()):
+                        if index >= _MAX_SITEMAP_ELEMENTS:
+                            raise SourceLimitError("Sitemap element limit exceeded.")
                         if element.tag.rsplit("}", 1)[-1] == "loc" and element.text:
                             target = self._normalize_url(element.text.strip())
                             if self._allowed(target, config):

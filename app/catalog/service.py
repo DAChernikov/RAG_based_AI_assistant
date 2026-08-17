@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import uuid
@@ -9,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.catalog.repository import CatalogRepository
+from app.concurrency import api_blocking_io
 from app.state.models import SourceVersionStatus
 
 
@@ -26,7 +26,7 @@ class CatalogService:
         self.repository = repository
 
     async def call(self, method, *args, **kwargs):
-        return await asyncio.to_thread(method, *args, **kwargs)
+        return await api_blocking_io.call(method, *args, **kwargs)
 
     async def record_fixture_ingestion(
         self,

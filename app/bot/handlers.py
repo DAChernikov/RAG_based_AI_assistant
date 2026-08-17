@@ -160,8 +160,9 @@ def _extract_api_error_message(exc: httpx.HTTPStatusError) -> str:
         detail = payload.get("detail")
         if detail:
             return str(detail)
-    except Exception:
-        pass
+    except ValueError:
+        # Error responses are allowed to contain non-JSON proxy bodies.
+        detail = None
 
     if exc.response.status_code == 429:
         return RATE_LIMIT_MESSAGE

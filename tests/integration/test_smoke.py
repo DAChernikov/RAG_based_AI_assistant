@@ -14,7 +14,7 @@ from app.api.services.llm_service import LLMTemporaryUnavailableError, OpenAICom
 from app.inference.application import QueuedInferenceApplication
 from app.inference.contracts import parse_event_contract
 from app.inference.redis_queue import RedisInferenceQueue
-from app.state.models import Conversation, Tenant, User
+from app.state.models import Conversation, KnowledgeBase, Tenant, User
 from app.state.repositories import ApplicationRepository, IdempotencyConflictError
 from app.worker.main import InferenceWorker
 
@@ -90,7 +90,10 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
         )
         session.add(user)
         session.flush()
-        identity = tenant.id, user.id
+        knowledge_base = KnowledgeBase(tenant_id=tenant.id, name=f"KB {suffix}")
+        session.add(knowledge_base)
+        session.flush()
+        identity = tenant.id, user.id, knowledge_base.id
 
     redis = Redis.from_url(redis_url, decode_responses=True)
     queue = RedisInferenceQueue(redis)
@@ -122,7 +125,13 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
     )
 
     creation, contract = await application.submit(
-        {"question": "integration question", "mode": None, "top_k": None, "max_new_tokens": None},
+        {
+            "question": "integration question",
+            "mode": None,
+            "top_k": None,
+            "max_new_tokens": None,
+            "knowledge_base_id": identity[2],
+        },
         tenant_id=identity[0],
         user_id=identity[1],
         idempotency_key=f"key-{suffix}",
@@ -139,7 +148,13 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
     assert job.answer.sources[0].source_id == "integration-source"
 
     reused, _ = await application.submit(
-        {"question": "integration question", "mode": None, "top_k": None, "max_new_tokens": None},
+        {
+            "question": "integration question",
+            "mode": None,
+            "top_k": None,
+            "max_new_tokens": None,
+            "knowledge_base_id": identity[2],
+        },
         tenant_id=identity[0],
         user_id=identity[1],
         idempotency_key=f"key-{suffix}",
@@ -154,6 +169,7 @@ async def test_postgres_redis_worker_end_to_end(monkeypatch):
                 "mode": None,
                 "top_k": None,
                 "max_new_tokens": None,
+                "knowledge_base_id": identity[2],
             },
             tenant_id=identity[0],
             user_id=identity[1],
@@ -225,7 +241,10 @@ async def test_real_queue_retry_and_terminal_dlq(monkeypatch):
         )
         session.add(user)
         session.flush()
-        identity = tenant.id, user.id
+        knowledge_base = KnowledgeBase(tenant_id=tenant.id, name=f"KB {suffix}")
+        session.add(knowledge_base)
+        session.flush()
+        identity = tenant.id, user.id, knowledge_base.id
 
     redis = Redis.from_url(redis_url, decode_responses=True)
     queue = RedisInferenceQueue(redis)
@@ -236,7 +255,13 @@ async def test_real_queue_retry_and_terminal_dlq(monkeypatch):
     retry_processor = TransientThenSuccessProcessor()
     retry_worker = InferenceWorker(repository, queue, retry_processor, worker_id=f"retry-{suffix}")
     retry_creation, retry_contract = await application.submit(
-        {"question": "retry", "mode": None, "top_k": None, "max_new_tokens": None},
+        {
+            "question": "retry",
+            "mode": None,
+            "top_k": None,
+            "max_new_tokens": None,
+            "knowledge_base_id": identity[2],
+        },
         tenant_id=identity[0],
         user_id=identity[1],
         idempotency_key=f"retry-{suffix}",
@@ -256,7 +281,13 @@ async def test_real_queue_retry_and_terminal_dlq(monkeypatch):
     assert retry_events[-1] == "completed"
 
     failed_creation, failed_contract = await application.submit(
-        {"question": "fail", "mode": None, "top_k": None, "max_new_tokens": None},
+        {
+            "question": "fail",
+            "mode": None,
+            "top_k": None,
+            "max_new_tokens": None,
+            "knowledge_base_id": identity[2],
+        },
         tenant_id=identity[0],
         user_id=identity[1],
         idempotency_key=f"fail-{suffix}",

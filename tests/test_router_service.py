@@ -1,41 +1,31 @@
+import uuid
+
 from app.api.services.router_service import RouterService
 
 
-def test_route_explicit_sql():
-    service = RouterService()
-    assert service.route("What is Apache Spark?", requested_mode="sql") == "sql"
+def test_route_plan_can_select_multiple_targets():
+    knowledge_base_id = uuid.uuid4()
+    plan = RouterService().plan(
+        "Show the Python repository code and write a SQL query for revenue",
+        knowledge_base_id,
+    )
+
+    assert plan.knowledge_base_id == knowledge_base_id
+    assert plan.retrieval_targets == ["documentation", "code", "database_schema"]
+    assert plan.requires_sql is True
+    assert plan.contract_version == "1.0"
 
 
-def test_route_explicit_rag_code():
-    service = RouterService()
-    assert service.route("How do I read JSON in Python?", requested_mode="rag_code") == "rag_code"
+def test_route_plan_has_safe_documentation_fallback():
+    plan = RouterService().plan("What is Apache Spark?", uuid.uuid4())
+
+    assert plan.retrieval_targets == ["documentation"]
+    assert plan.requires_sql is False
 
 
-def test_route_auto_sql():
-    service = RouterService()
-    result = service.route("Write SQL query for revenue by day")
-    assert result == "sql"
+def test_explicit_mode_is_honored_without_becoming_exclusive():
+    plan = RouterService().plan("Explain the API", uuid.uuid4(), requested_mode="sql")
 
-
-def test_route_auto_rag_code():
-    service = RouterService()
-    result = service.route("How do I safely get a nested value from a Python dict?")
-    assert result == "rag_code"
-
-
-def test_route_auto_rag_docs():
-    service = RouterService()
-    result = service.route("What is Apache Spark?")
-    assert result == "rag_docs"
-
-
-def test_route_sales_by_product_category_as_sql():
-    service = RouterService()
-    result = service.route("Show sales by product category")
-    assert result == "sql"
-
-
-def test_route_currency_conversion_as_sql():
-    service = RouterService()
-    result = service.route("Convert daily order revenue from EUR to USD")
-    assert result == "sql"
+    assert "documentation" in plan.retrieval_targets
+    assert "code" in plan.retrieval_targets
+    assert "database_schema" in plan.retrieval_targets

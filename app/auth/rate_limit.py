@@ -31,7 +31,7 @@ class RedisLoginRateLimiter:
             _INCREMENT_WINDOW,
             1,
             self._key(identity),
-            self.window_seconds,
+            str(self.window_seconds),
         )
         if int(count) > self.attempts:
             raise AuthenticationError("Too many login attempts. Try again later.")

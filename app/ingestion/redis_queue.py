@@ -29,7 +29,10 @@ class RedisIngestionQueue:
 
     async def enqueue(self, contract: IngestionJobContract) -> str:
         return await self.redis.xadd(
-            settings.ingestion_jobs_stream, {"contract": contract.model_dump_json()}
+            settings.ingestion_jobs_stream,
+            {"contract": contract.model_dump_json()},
+            maxlen=settings.redis_stream_maxlen,
+            approximate=True,
         )
 
     async def read_jobs(self, worker_id: str) -> list[tuple[str, dict]]:
@@ -86,6 +89,8 @@ class RedisIngestionQueue:
                 "error_code": code[:100],
                 "message": message[:500],
             },
+            maxlen=settings.redis_stream_maxlen,
+            approximate=True,
         )
 
     async def heartbeat(self, worker_id: str) -> None:

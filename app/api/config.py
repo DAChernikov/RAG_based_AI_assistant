@@ -1,8 +1,7 @@
-from pathlib import Path
+from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -12,20 +11,14 @@ class Settings(BaseSettings):
 
     app_env: str = "dev"
     log_level: str = "INFO"
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"
     api_port: int = 8000
-
-    artifacts_dir: str = str(PROJECT_ROOT / "artifacts")
-    force_artifacts_download: bool = False
-    artifacts_max_archive_bytes: int = 2_147_483_648
-    artifacts_max_extracted_bytes: int = 4_294_967_296
-
-    s3_endpoint_url: str | None = None
-    s3_bucket: str | None = None
-    s3_artifact_key: str = "rag-baseline/artifacts_rag_baseline_latest.zip"
-    aws_access_key_id: str | None = None
-    aws_secret_access_key: str | None = None
-    aws_default_region: str = "eu-central-1"
+    trusted_proxy_cidrs: str = "127.0.0.1"
+    max_request_body_bytes: int = 1_048_576
+    sse_max_lifetime_sec: int = 900
+    inference_api_concurrency: int = 32
+    otel_service_name: str = "rag-api"
+    otel_exporter_otlp_endpoint: str | None = None
 
     default_mode: str = "rag"
     top_k: int = 5
@@ -65,7 +58,7 @@ class Settings(BaseSettings):
     model_readiness_timeout: float = 2.0
     model_readiness_path: str = "/models"
 
-    inference_execution_mode: str = "direct"
+    inference_execution_mode: str = "queued"
     database_url: str = "postgresql+psycopg://rag:rag@127.0.0.1:5432/rag"
     redis_url: str = "redis://127.0.0.1:6379/0"
     inference_jobs_stream: str = "rag:inference:jobs"
@@ -96,6 +89,31 @@ class Settings(BaseSettings):
     ingestion_claim_idle_ms: int = 60000
     ingestion_lease_sec: int = 300
     ingestion_max_attempts: int = 3
+    embedding_api_base_url: str = "http://127.0.0.1:8001/v1"
+    embedding_api_token: str | None = None
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_model_version: str = "bge-m3/1"
+    embedding_request_timeout: float = 60.0
+    embedding_batch_size: int = 32
+    reranker_api_base_url: str | None = None
+    reranker_api_token: str | None = None
+    reranker_request_timeout: float = 20.0
+    indexing_jobs_stream: str = "rag:indexing:jobs"
+    indexing_consumer_group: str = "rag-indexing-workers"
+    indexing_dlq_stream: str = "rag:indexing:dlq"
+    indexing_heartbeat_prefix: str = "rag:indexing:heartbeat"
+    indexing_stream_maxlen: int = 10_000
+    indexing_worker_id: str = "indexing-worker-1"
+    indexing_worker_block_ms: int = 2000
+    indexing_claim_idle_ms: int = 60_000
+    indexing_lease_sec: int = 300
+    indexing_max_attempts: int = 3
+    scheduler_id: str = "scheduler-1"
+    scheduler_poll_sec: int = 15
+    scheduler_leader_ttl_sec: int = 45
+    scheduler_max_catchup: int = 20
+    redis_stream_maxlen: int = 10_000
+    maintenance_batch_size: int = 500
     compatibility_tenant_slug: str = "development"
     compatibility_user_external_id: str = "development-user"
     auth_disabled: bool = False
@@ -105,13 +123,41 @@ class Settings(BaseSettings):
     access_token_ttl_sec: int = 900
     refresh_token_ttl_sec: int = 2_592_000
     api_key_default_ttl_sec: int = 7_776_000
+    auth_cookie_secure: bool = False
+    auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    cors_allowed_origins: str = "http://localhost:3000,http://localhost:5173"
     login_rate_limit_attempts: int = 5
     login_rate_limit_window_sec: int = 60
     login_rate_limit_prefix: str = "rag:auth:login"
+    inference_rate_limit_per_minute: int = 60
+    admin_mutation_rate_limit_per_minute: int = 30
     worker_lease_sec: int = 300
 
     stream_edit_interval_sec: float = 1.0
     stream_min_chars_delta: int = 40
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
+
+    @model_validator(mode="after")
+    def fail_closed_in_production(self):
+        if self.app_env == "production":
+            if self.auth_disabled:
+                raise ValueError("AUTH_DISABLED is forbidden in production.")
+            if not self.auth_cookie_secure:
+                raise ValueError("AUTH_COOKIE_SECURE must be true in production.")
+            if len(self.jwt_secret or "") < 48 or "replace" in (self.jwt_secret or "").lower():
+                raise ValueError("A strong production JWT_SECRET is required.")
+            if any(not origin.startswith("https://") for origin in self.cors_origins):
+                raise ValueError("Production CORS origins must use HTTPS.")
+            if "change-me" in self.database_url or "REPLACE" in self.database_url:
+                raise ValueError("Production DATABASE_URL contains a placeholder.")
+            if "REPLACE" in self.redis_url or "change-me" in self.redis_url:
+                raise ValueError("Production REDIS_URL contains a placeholder.")
+            if self.trusted_proxy_cidrs.strip() == "*":
+                raise ValueError("Production trusted proxies must be explicit CIDRs.")
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

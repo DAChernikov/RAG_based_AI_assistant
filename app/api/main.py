@@ -1,12 +1,35 @@
+import asyncio
+import hashlib
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from prometheus_client import make_asgi_app
 
 from app.api.config import settings
-from app.api.routes import admin, api_keys, ask, auth, catalog, health, jobs, users
-from app.api.services.artifact_manager import ArtifactManager
-from app.api.services.llm_service import LLMService
+from app.api.routes import (
+    admin,
+    api_keys,
+    ask,
+    auth,
+    catalog,
+    health,
+    indexing,
+    jobs,
+    knowledge,
+    operations,
+    users,
+)
+from app.observability import configure_tracing, log_event, tracer
+
+_RATE_LIMIT_SCRIPT = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+return count
+"""
 
 
 def validate_auth_configuration() -> None:
@@ -17,22 +40,17 @@ def validate_auth_configuration() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     mode = settings.inference_execution_mode.lower()
-    if mode not in {"direct", "queued"}:
-        raise RuntimeError("INFERENCE_EXECUTION_MODE must be direct or queued.")
+    if mode != "queued":
+        raise RuntimeError("INFERENCE_EXECUTION_MODE must be queued.")
     validate_auth_configuration()
+    configure_tracing(settings.otel_service_name, settings.otel_exporter_otlp_endpoint)
 
-    runtime = {
+    runtime: dict[str, Any] = {
         "execution_mode": mode,
         "settings": settings,
-        "artifacts_ready": False,
-        "rag_ready": False,
         "llm_name": settings.generation_model,
-        "artifacts_dir": settings.artifacts_dir,
-        "rag_service": None,
-        "retriever": None,
-        "llm_service": None,
         "database_engine": None,
         "repository": None,
         "queue": None,
@@ -44,6 +62,11 @@ async def lifespan(app: FastAPI):
         "catalog_service": None,
         "ingestion_queue": None,
         "startup_error": None,
+        "inference_semaphore": asyncio.Semaphore(settings.inference_api_concurrency),
+        "index_repository": None,
+        "indexing_queue": None,
+        "embedding_client": None,
+        "operations_repository": None,
     }
 
     try:
@@ -65,15 +88,34 @@ async def lifespan(app: FastAPI):
         runtime["auth_repository"] = auth_repository
         runtime["catalog_repository"] = catalog_repository
         runtime["catalog_service"] = CatalogService(catalog_repository)
-        try:
-            from app.ingestion.redis_queue import RedisIngestionQueue
+        from app.operations.repository import OperationsRepository
 
-            ingestion_queue = RedisIngestionQueue()
-            await ingestion_queue.ensure_group()
-            runtime["ingestion_queue"] = ingestion_queue
-        except Exception:
-            if "ingestion_queue" in locals():
-                await ingestion_queue.close()
+        runtime["operations_repository"] = OperationsRepository(session_factory)
+        from app.embeddings.client import EmbeddingClient
+        from app.indexing.redis_queue import RedisIndexingQueue
+        from app.indexing.repository import IndexRepository
+
+        runtime["index_repository"] = IndexRepository(session_factory)
+        embedding_client = EmbeddingClient(
+            settings.embedding_api_base_url,
+            settings.embedding_model,
+            token=settings.embedding_api_token,
+            timeout=settings.embedding_request_timeout,
+        )
+        runtime["embedding_client"] = embedding_client
+        from app.retrieval.hybrid import HybridRetrievalRepository, HybridRetriever
+
+        runtime["hybrid_retriever"] = HybridRetriever(
+            HybridRetrievalRepository(session_factory), embedding_client
+        )
+        indexing_queue = RedisIndexingQueue()
+        await indexing_queue.ensure_group()
+        runtime["indexing_queue"] = indexing_queue
+        from app.ingestion.redis_queue import RedisIngestionQueue
+
+        ingestion_queue = RedisIngestionQueue()
+        await ingestion_queue.ensure_group()
+        runtime["ingestion_queue"] = ingestion_queue
         if not settings.auth_disabled:
             from redis.asyncio import Redis
 
@@ -92,42 +134,24 @@ async def lifespan(app: FastAPI):
                 ),
             )
 
-        if mode == "direct":
-            from app.api.services.rag_service import RAGService
-            from app.api.services.retriever_loader import RetrieverLoader
+        from app.inference.application import QueuedInferenceApplication
+        from app.inference.redis_queue import RedisInferenceQueue
 
-            manager = ArtifactManager(settings.artifacts_dir)
-            manager.prepare()
-            runtime["artifacts_ready"] = manager.has_required_artifacts()
-            if runtime["artifacts_ready"]:
-                retriever = RetrieverLoader(settings.artifacts_dir).load()
-                llm_service = LLMService()
-                runtime["retriever"] = retriever
-                runtime["llm_service"] = llm_service
-                runtime["rag_service"] = RAGService(retriever=retriever, llm_service=llm_service)
-                runtime["rag_ready"] = True
-            else:
-                runtime["startup_error"] = "Required artifacts were not found."
-        else:
-            from app.inference.application import QueuedInferenceApplication
-            from app.inference.redis_queue import RedisInferenceQueue
-
-            queue = RedisInferenceQueue()
-            runtime["queue"] = queue
-            runtime["queued_application"] = QueuedInferenceApplication(repository, queue)
-            await queue.ensure_group()
-    except Exception:
+        queue = RedisInferenceQueue()
+        runtime["queue"] = queue
+        runtime["queued_application"] = QueuedInferenceApplication(repository, queue)
+        await queue.ensure_group()
+    except Exception as exc:
         runtime["startup_error"] = (
             "Runtime initialization failed. Check local configuration and service logs."
         )
+        log_event("api_startup_failed", error_type=type(exc).__name__)
+        raise RuntimeError(runtime["startup_error"]) from exc
 
     app.state.runtime = runtime
     try:
         yield
     finally:
-        llm_service = runtime.get("llm_service")
-        if llm_service is not None:
-            await llm_service.aclose()
         queue = runtime.get("queue")
         if queue is not None:
             await queue.close()
@@ -137,6 +161,12 @@ async def lifespan(app: FastAPI):
         auth_redis = runtime.get("auth_redis")
         if auth_redis is not None:
             await auth_redis.aclose()
+        indexing_queue = runtime.get("indexing_queue")
+        if indexing_queue is not None:
+            await indexing_queue.close()
+        embedding_client = runtime.get("embedding_client")
+        if embedding_client is not None:
+            await embedding_client.close()
         engine = runtime.get("database_engine")
         if engine is not None:
             engine.dispose()
@@ -148,6 +178,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-Token"],
+    )
+
 
 @app.middleware("http")
 async def correlation_middleware(request: Request, call_next):
@@ -157,8 +196,53 @@ async def correlation_middleware(request: Request, call_next):
     except ValueError:
         correlation_id = uuid.uuid4()
     request.state.correlation_id = correlation_id
-    response = await call_next(request)
+    content_length = request.headers.get("content-length")
+    try:
+        body_too_large = bool(
+            content_length and int(content_length) > settings.max_request_body_bytes
+        )
+    except ValueError:
+        return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+    if body_too_large:
+        return JSONResponse(status_code=413, content={"detail": "Request body is too large."})
+    category = None
+    limit = 0
+    if request.method == "POST" and (
+        request.url.path.startswith("/ask") or request.url.path.startswith("/v1/inference-jobs")
+    ):
+        category, limit = "inference", settings.inference_rate_limit_per_minute
+    elif request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith(
+        "/v1/admin"
+    ):
+        category, limit = "admin", settings.admin_mutation_rate_limit_per_minute
+    runtime = getattr(request.app.state, "runtime", {})
+    redis = runtime.get("auth_redis")
+    if category and redis is not None:
+        credential = request.headers.get("authorization") or request.headers.get("x-api-key", "")
+        fingerprint = hashlib.sha256(credential.encode()).hexdigest()[:24]
+        try:
+            count = await redis.eval(
+                _RATE_LIMIT_SCRIPT, 1, f"rag:rate:{category}:{fingerprint}", "60"
+            )
+        except Exception as exc:
+            log_event("rate_limit_unavailable", error_type=type(exc).__name__)
+            return JSONResponse(status_code=503, content={"detail": "Rate limiter unavailable."})
+        if int(count) > limit:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Request rate limit exceeded."},
+                headers={"Retry-After": "60"},
+            )
+    with tracer().start_as_current_span(
+        "http.request",
+        attributes={"http.request.method": request.method, "url.path": request.url.path},
+    ):
+        response = await call_next(request)
     response.headers["X-Correlation-Id"] = str(correlation_id)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
 
 
@@ -166,7 +250,11 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(ask.router)
 app.include_router(jobs.router)
+app.include_router(knowledge.router)
 app.include_router(api_keys.router)
 app.include_router(users.router)
 app.include_router(catalog.router)
+app.include_router(indexing.router)
+app.include_router(operations.router)
 app.include_router(admin.router)
+app.mount("/metrics", make_asgi_app())

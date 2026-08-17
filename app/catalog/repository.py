@@ -122,6 +122,19 @@ class CatalogRepository:
                 )
             )
 
+    def knowledge_base_ids_for_source(
+        self, tenant_id: uuid.UUID, source_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        with self.session_factory() as session:
+            return list(
+                session.scalars(
+                    select(KnowledgeBaseSource.knowledge_base_id).where(
+                        KnowledgeBaseSource.tenant_id == tenant_id,
+                        KnowledgeBaseSource.source_id == source_id,
+                    )
+                )
+            )
+
     def get_knowledge_base(
         self, tenant_id: uuid.UUID, knowledge_base_id: uuid.UUID
     ) -> KnowledgeBase | None:

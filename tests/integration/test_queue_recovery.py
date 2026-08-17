@@ -37,6 +37,7 @@ async def test_pending_message_can_be_reclaimed(monkeypatch):
         user_id=uuid.uuid4(),
         conversation_id=uuid.uuid4(),
         message_id=uuid.uuid4(),
+        knowledge_base_id=uuid.uuid4(),
         question="claim",
     )
     await queue.enqueue(contract)

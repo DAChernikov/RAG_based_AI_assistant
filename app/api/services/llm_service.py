@@ -211,6 +211,8 @@ class OpenAICompatibleLLMService:
             self._raise_for_llm_status(response)
             return self._extract_message_content(response.json())
 
+        raise LLMTemporaryUnavailableError()
+
     async def stream_generate(
         self,
         *,
@@ -284,9 +286,9 @@ class OpenAICompatibleLLMService:
     async def __aenter__(self) -> OpenAICompatibleLLMService:
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
         await self.aclose()
 
 
-# Temporary compatibility alias used by RAGService, SQLService, and existing imports.
+# Stable application-facing alias for the provider-neutral HTTP gateway.
 LLMService = OpenAICompatibleLLMService

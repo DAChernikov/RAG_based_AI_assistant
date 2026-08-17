@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -96,6 +98,7 @@ def create_contract(repository, identity):
         user_id=user_id,
         conversation_id=creation.job.conversation_id,
         message_id=creation.job.user_message_id,
+        knowledge_base_id=uuid.uuid4(),
         question="question",
     )
 

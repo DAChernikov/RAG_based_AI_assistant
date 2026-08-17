@@ -4,6 +4,9 @@ import hashlib
 import json
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.catalog.configs import JDBCSourceConfig
 from app.connectors.base import (
@@ -15,8 +18,9 @@ from app.connectors.base import (
     SSRFProtectionError,
     TransientConnectorError,
 )
-from app.connectors.jdbc import JDBCMetadataConnector
+from app.connectors.jdbc import JDBCMetadataConnector, resolve_public_database_host
 from app.connectors.jdbc_registry import ManagedDriverError, ManagedDriverRegistry
+from app.state.models import Base, JDBCDriverRegistryEntry
 
 
 class FakeResolver(CredentialResolver):
@@ -156,15 +160,45 @@ def metadata(comment="Demo table", include_view=True):
     }
 
 
-async def allow_test_host(_host: str) -> None:
-    return None
+async def allow_test_host(_host: str) -> tuple[str, ...]:
+    return ("203.0.113.10",)
+
+
+@pytest.fixture
+def registry():
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        session.add(
+            JDBCDriverRegistryEntry(
+                driver_id="postgresql",
+                registry_version="1",
+                dialect="postgresql",
+                adapter="psycopg",
+                adapter_version="3.2.4",
+                manifest_checksum=(
+                    "f9a977f43ffd5fa678871b0b563c76613ba9ab70fb3ca6480b138df47e5ed1b1"
+                ),
+                allowed_properties=["sslmode"],
+                is_enabled=True,
+            )
+        )
+    return ManagedDriverRegistry(factory)
 
 
 @pytest.mark.asyncio
-async def test_jdbc_metadata_is_deterministic_read_only_and_incremental():
+async def test_jdbc_metadata_is_deterministic_read_only_and_incremental(registry):
     factory = FakeConnectionFactory(metadata())
     connector = JDBCMetadataConnector(
-        FakeResolver(), connection_factory=factory, host_validator=allow_test_host
+        FakeResolver(),
+        registry=registry,
+        connection_factory=factory,
+        host_validator=allow_test_host,
     )
 
     first = await connector.discover(config())
@@ -197,6 +231,8 @@ async def test_jdbc_metadata_is_deterministic_read_only_and_incremental():
 
     connection = factory.parameters[0]
     assert connection["sslmode"] == "verify-full"
+    assert connection["host"] == "db.example.test"
+    assert connection["hostaddr"] == "203.0.113.10"
     assert connection["connect_timeout"] == 10
     assert "default_transaction_read_only=on" in connection["options"]
     assert "statement_timeout=15000" in connection["options"]
@@ -208,9 +244,10 @@ async def test_jdbc_metadata_is_deterministic_read_only_and_incremental():
 
 
 @pytest.mark.asyncio
-async def test_jdbc_incremental_change_and_delete():
+async def test_jdbc_incremental_change_and_delete(registry):
     first_connector = JDBCMetadataConnector(
         FakeResolver(),
+        registry=registry,
         connection_factory=FakeConnectionFactory(metadata()),
         host_validator=allow_test_host,
     )
@@ -221,6 +258,7 @@ async def test_jdbc_incremental_change_and_delete():
     }
     second_connector = JDBCMetadataConnector(
         FakeResolver(),
+        registry=registry,
         connection_factory=FakeConnectionFactory(metadata("Changed", include_view=False)),
         host_validator=allow_test_host,
     )
@@ -231,9 +269,10 @@ async def test_jdbc_incremental_change_and_delete():
 
 
 @pytest.mark.asyncio
-async def test_jdbc_rejects_cross_channel_credentials_and_private_network():
+async def test_jdbc_rejects_cross_channel_credentials_and_private_network(registry):
     connector = JDBCMetadataConnector(
         FakeResolver(CredentialMaterial(http_headers={"Authorization": "Bearer private"})),
+        registry=registry,
         connection_factory=FakeConnectionFactory(metadata()),
         host_validator=allow_test_host,
     )
@@ -243,20 +282,23 @@ async def test_jdbc_rejects_cross_channel_credentials_and_private_network():
     async def reject_host(_host):
         raise SSRFProtectionError("blocked")
 
-    blocked = JDBCMetadataConnector(FakeResolver(), host_validator=reject_host)
+    blocked = JDBCMetadataConnector(FakeResolver(), registry=registry, host_validator=reject_host)
     with pytest.raises(SSRFProtectionError):
         await blocked.discover(config())
 
 
 @pytest.mark.asyncio
-async def test_jdbc_connection_errors_are_sanitized():
+async def test_jdbc_connection_errors_are_sanitized(registry):
     def fail_connection(**_kwargs):
         import psycopg
 
         raise psycopg.OperationalError("password=private-value")
 
     connector = JDBCMetadataConnector(
-        FakeResolver(), connection_factory=fail_connection, host_validator=allow_test_host
+        FakeResolver(),
+        registry=registry,
+        connection_factory=fail_connection,
+        host_validator=allow_test_host,
     )
     with pytest.raises(TransientConnectorError) as error:
         await connector.discover(config())
@@ -264,8 +306,7 @@ async def test_jdbc_connection_errors_are_sanitized():
     assert "private-value" not in str(error.value)
 
 
-def test_managed_driver_registry_rejects_unknown_or_unversioned_drivers():
-    registry = ManagedDriverRegistry()
+def test_managed_driver_registry_rejects_unknown_or_unversioned_drivers(registry):
     assert registry.require("postgresql", "1").adapter == "psycopg"
     with pytest.raises(ManagedDriverError):
         registry.require("postgresql", "2")
@@ -292,3 +333,37 @@ async def test_environment_connection_reference_resolves_database_channel(monkey
     material = await EnvironmentCredentialResolver().resolve(reference)
     assert set(material.database_parameters) == {"username", "password"}
     assert material.http_headers == material.git_environment == {}
+
+
+@pytest.mark.asyncio
+async def test_jdbc_dns_resolution_accepts_public_ipv4_ipv6_and_is_stable(monkeypatch, registry):
+    calls = 0
+
+    def addresses(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [
+            (2, 1, 6, "", ("8.8.8.8", 0)),
+            (10, 1, 6, "", ("2606:4700:4700::1111", 0, 0, 0)),
+        ]
+
+    monkeypatch.setattr("app.connectors.jdbc.socket.getaddrinfo", addresses)
+    resolved = await resolve_public_database_host("db.example.test")
+    assert resolved == ("8.8.8.8", "2606:4700:4700::1111")
+
+    factory = FakeConnectionFactory(metadata())
+    connector = JDBCMetadataConnector(FakeResolver(), registry=registry, connection_factory=factory)
+    await connector.discover(config())
+    assert calls == 2  # one direct check and exactly one connector resolution
+    assert factory.parameters[0]["hostaddr"] == "8.8.8.8"
+    assert factory.parameters[0]["host"] == "db.example.test"
+
+
+@pytest.mark.asyncio
+async def test_jdbc_dns_rebinding_to_private_address_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        "app.connectors.jdbc.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 0))],
+    )
+    with pytest.raises(SSRFProtectionError):
+        await resolve_public_database_host("db.example.test")

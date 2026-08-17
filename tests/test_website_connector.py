@@ -119,6 +119,33 @@ async def test_website_discovery_extracts_structure_and_incremental_changes():
 
 
 @pytest.mark.asyncio
+async def test_sitemap_rejects_dtd_and_external_entities():
+    requested = []
+
+    def handler(request: httpx.Request):
+        requested.append(request.url.path)
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(
+                200,
+                content=(
+                    b'<!DOCTYPE urlset [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+                    b"<urlset><url><loc>&xxe;</loc></url></urlset>"
+                ),
+                headers={"content-type": "application/xml"},
+            )
+        return httpx.Response(200, text="<h1>Safe root</h1>", headers={"content-type": "text/html"})
+
+    connector = WebsiteConnector(
+        FakeCredentialResolver(),
+        transport=httpx.MockTransport(handler),
+        host_validator=allow_test_host,
+    )
+    result = await connector.discover(config(use_sitemap=True))
+    assert len(result.documents) == 1
+    assert requested == ["/", "/sitemap.xml"]
+
+
+@pytest.mark.asyncio
 async def test_website_redirect_is_revalidated_against_allowlist():
     def handler(_request: httpx.Request):
         return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data"})

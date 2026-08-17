@@ -1,75 +1,74 @@
 from __future__ import annotations
 
 import re
+import uuid
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from app.retrieval.contracts import RetrievalFilters
+
+
+class RoutePlan(BaseModel):
+    contract_version: Literal["1.0"] = "1.0"
+    knowledge_base_id: uuid.UUID
+    intents: list[str]
+    retrieval_targets: list[Literal["documentation", "code", "database_schema"]]
+    source_filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
+    requires_sql: bool = False
+    confidence: float = Field(ge=0, le=1)
+    reasons: list[str]
 
 
 class RouterService:
-    """Небольшой маршрутизатор пользовательских запросов в RAG-системе по ключевым словам"""
-
-    SQL_HINTS = (
+    SQL_HINTS = {
         "sql",
+        "select",
         "query",
-        "select ",
-        " join ",
-        " group by",
-        "order by",
-        "table ",
-        "schema ",
+        "table",
+        "schema",
+        "join",
+        "revenue",
+        "orders",
         "aggregation",
-        "write sql",
-        "give me sql",
-        "give me a sql",
-        "sql command",
-        "revenue by",
-        "sales by",
-        "orders by",
-        "refund rate",
-        "refund amount",
-        "campaign revenue",
-        "marketing channel",
-        "store type",
-        "sales channel",
-        "customer segment",
-        "product category",
-        "quantity sold",
-        "support tickets by",
-        "purchase events by",
-        "convert daily order revenue",
-        "eur to usd",
-    )
-
-    CODE_HINTS = (
+    }
+    CODE_HINTS = {
         "python",
-        "dict",
-        "json",
-        "list",
-        "function",
         "code",
-        "snippet",
-        "example",
-        "nested value",
-        "missing keys",
-        "dict.get",
-        "pandas dataframe",
-    )
+        "function",
+        "class",
+        "repository",
+        "api",
+        "implementation",
+        "пример кода",
+    }
 
-    @staticmethod
-    def _normalize(question: str) -> str:
-        return re.sub(r"\s+", " ", question.lower()).strip()
-
-    def route(self, question: str, requested_mode: str | None = None) -> str:
-        if requested_mode == "sql":
-            return "sql"
-
-        if requested_mode in {"rag_docs", "rag_code"}:
-            return requested_mode
-
-        q = self._normalize(question)
-
-        if any(token in q for token in self.SQL_HINTS):
-            return "sql"
-
-        if any(token in q for token in self.CODE_HINTS):
-            return "rag_code"
-
-        return "rag_docs"
+    def plan(
+        self,
+        question: str,
+        knowledge_base_id: uuid.UUID,
+        requested_mode: str | None = None,
+    ) -> RoutePlan:
+        normalized = re.sub(r"[^\w]+", " ", question.casefold())
+        tokens = set(normalized.split())
+        sql = requested_mode == "sql" or bool(tokens & self.SQL_HINTS)
+        code = requested_mode == "rag_code" or bool(tokens & self.CODE_HINTS)
+        targets: list[Literal["documentation", "code", "database_schema"]] = ["documentation"]
+        intents = ["answer"]
+        reasons = ["documentation is the safe default retrieval target"]
+        if code:
+            targets.append("code")
+            intents.append("code_explanation")
+            reasons.append("code-related terms detected")
+        if sql:
+            targets.append("database_schema")
+            intents.append("sql_generation")
+            reasons.append("SQL or data-analysis terms detected")
+        return RoutePlan(
+            knowledge_base_id=knowledge_base_id,
+            intents=list(dict.fromkeys(intents)),
+            retrieval_targets=list(dict.fromkeys(targets)),
+            requires_sql=sql,
+            confidence=0.9 if requested_mode else (0.82 if sql or code else 0.65),
+            reasons=reasons,
+        )

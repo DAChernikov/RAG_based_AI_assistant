@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 
 from app.api.dependencies import get_runtime_state, require_admin
@@ -28,8 +27,13 @@ from app.catalog.schemas import (
     SourceRefreshRequest,
     SourceVersionResponse,
 )
+from app.concurrency import api_blocking_io
 
 router = APIRouter(prefix="/v1/admin", tags=["knowledge-catalog"])
+
+
+def _page(items: list, offset: int, limit: int) -> list:
+    return items[offset : offset + limit]
 
 
 def _knowledge_base_response(item) -> KnowledgeBaseResponse:
@@ -112,7 +116,7 @@ async def _audit(
     if service is not None:
         await service._call(runtime["auth_repository"].audit, **kwargs)
     else:
-        await asyncio.to_thread(runtime["auth_repository"].audit, **kwargs)
+        await api_blocking_io.call(runtime["auth_repository"].audit, **kwargs)
 
 
 async def _audit_denied(
@@ -135,12 +139,14 @@ async def _audit_denied(
     if service is not None:
         await service._call(runtime["auth_repository"].audit, **kwargs)
     else:
-        await asyncio.to_thread(runtime["auth_repository"].audit, **kwargs)
+        await api_blocking_io.call(runtime["auth_repository"].audit, **kwargs)
 
 
 @router.get("/knowledge-bases", response_model=list[KnowledgeBaseResponse])
 async def list_knowledge_bases(
     request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
@@ -155,7 +161,7 @@ async def list_knowledge_bases(
         "tenant",
         principal.tenant_id,
     )
-    return [_knowledge_base_response(item) for item in items]
+    return [_knowledge_base_response(item) for item in _page(items, offset, limit)]
 
 
 @router.post("/knowledge-bases", response_model=KnowledgeBaseResponse, status_code=201)
@@ -246,6 +252,8 @@ async def delete_knowledge_base(
 @router.get("/knowledge-sources", response_model=list[KnowledgeSourceResponse])
 async def list_sources(
     request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
@@ -260,7 +268,7 @@ async def list_sources(
         "tenant",
         principal.tenant_id,
     )
-    return [_source_response(item) for item in items]
+    return [_source_response(item) for item in _page(items, offset, limit)]
 
 
 @router.post("/knowledge-sources", response_model=KnowledgeSourceResponse, status_code=201)
@@ -384,6 +392,8 @@ async def delete_source(
 async def list_linked_sources(
     knowledge_base_id: uuid.UUID,
     request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
@@ -400,7 +410,7 @@ async def list_linked_sources(
         "knowledge_base",
         knowledge_base_id,
     )
-    return [_source_response(item) for item in items]
+    return [_source_response(item) for item in _page(items, offset, limit)]
 
 
 @router.put("/knowledge-bases/{knowledge_base_id}/sources/{source_id}", status_code=204)
@@ -466,6 +476,8 @@ async def unlink_source(
 async def list_versions(
     source_id: uuid.UUID,
     request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
@@ -480,7 +492,7 @@ async def list_versions(
         "knowledge_source",
         source_id,
     )
-    return [_version_response(item) for item in items]
+    return [_version_response(item) for item in _page(items, offset, limit)]
 
 
 @router.get(
@@ -490,6 +502,8 @@ async def list_versions(
 async def list_ingestion_runs(
     source_id: uuid.UUID,
     request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
@@ -506,7 +520,7 @@ async def list_ingestion_runs(
         "knowledge_source",
         source_id,
     )
-    return [_run_response(item) for item in items]
+    return [_run_response(item) for item in _page(items, offset, limit)]
 
 
 @router.post(
@@ -602,6 +616,8 @@ async def get_ingestion_run(
 async def get_ingestion_events(
     run_id: uuid.UUID,
     request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
@@ -616,7 +632,7 @@ async def get_ingestion_events(
         raise HTTPException(status_code=503, detail="Ingestion events are unavailable.")
     events = await queue.list_events(run_id)
     await _audit(request, runtime, principal, "ingestion_run.events", "ingestion_run", run_id)
-    return events
+    return _page(events, offset, limit)
 
 
 @router.post("/ingestion-runs/{run_id}/cancel", response_model=IngestionRunResponse)
@@ -698,5 +714,3 @@ async def rollback_version(
     return await _activate(
         source_id, version_id, request, principal, runtime, "source_version.rollback"
     )
-    IngestionEventResponse,
-    SourceRefreshRequest,

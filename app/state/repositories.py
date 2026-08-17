@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
+from app.concurrency import api_blocking_io
 from app.state.models import (
     Answer,
     AnswerSource,
@@ -32,6 +32,10 @@ class IdentityNotSeededError(RuntimeError):
 
 
 class ConversationAccessError(RuntimeError):
+    pass
+
+
+class JobCancelledError(RuntimeError):
     pass
 
 
@@ -172,6 +176,8 @@ class ApplicationRepository:
                 select(InferenceJob)
                 .where(
                     InferenceJob.id == job_id,
+                    InferenceJob.cancel_requested.is_(False),
+                    InferenceJob.attempt_count < InferenceJob.max_attempts,
                     or_(
                         InferenceJob.status == JobStatus.QUEUED.value,
                         (
@@ -196,6 +202,36 @@ class ApplicationRepository:
             session.flush()
             return job, lease_token
 
+    def fail_exhausted_job(self, job_id: uuid.UUID) -> bool:
+        """Atomically terminalize a queued/stale job whose attempt budget is exhausted."""
+        with self.session_factory.begin() as session:
+            now = datetime.now(UTC)
+            job = session.scalar(
+                select(InferenceJob)
+                .where(
+                    InferenceJob.id == job_id,
+                    InferenceJob.attempt_count >= InferenceJob.max_attempts,
+                    or_(
+                        InferenceJob.status == JobStatus.QUEUED.value,
+                        (
+                            (InferenceJob.status == JobStatus.RUNNING.value)
+                            & (InferenceJob.lease_expires_at < now)
+                        ),
+                    ),
+                )
+                .with_for_update(skip_locked=True)
+            )
+            if job is None:
+                return False
+            job.status = JobStatus.FAILED.value
+            job.failed_at = now
+            job.error_code = "retry_exhausted"
+            job.error_message = "Inference retry budget was exhausted."
+            job.lease_owner = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            return True
+
     def renew_job_lease(
         self, job_id: uuid.UUID, lease_token: uuid.UUID, lease_seconds: int
     ) -> bool:
@@ -206,6 +242,7 @@ class ApplicationRepository:
                     InferenceJob.id == job_id,
                     InferenceJob.status == JobStatus.RUNNING.value,
                     InferenceJob.lease_token == lease_token,
+                    InferenceJob.cancel_requested.is_(False),
                 )
                 .with_for_update()
             )
@@ -220,7 +257,7 @@ class ApplicationRepository:
         code: str,
         message: str,
         lease_token: uuid.UUID | None = None,
-    ) -> None:
+    ) -> bool:
         with self.session_factory.begin() as session:
             job = session.get(InferenceJob, job_id)
             if (
@@ -234,6 +271,8 @@ class ApplicationRepository:
                 job.lease_owner = None
                 job.lease_token = None
                 job.lease_expires_at = None
+                return True
+            return False
 
     def mark_failed(
         self,
@@ -241,7 +280,7 @@ class ApplicationRepository:
         code: str,
         message: str,
         lease_token: uuid.UUID | None = None,
-    ) -> None:
+    ) -> bool:
         with self.session_factory.begin() as session:
             job = session.get(InferenceJob, job_id)
             if (
@@ -256,6 +295,8 @@ class ApplicationRepository:
                 job.lease_owner = None
                 job.lease_token = None
                 job.lease_expires_at = None
+                return True
+            return False
 
     def complete_job(
         self,
@@ -275,10 +316,12 @@ class ApplicationRepository:
             )
             if job is None:
                 raise LookupError("Inference job was not found.")
-            if job.answer is not None:
-                return job.answer
             if lease_token is not None and job.lease_token != lease_token:
                 raise RuntimeError("Inference job lease is no longer owned by this worker.")
+            if job.cancel_requested:
+                raise JobCancelledError("Inference job was cancelled.")
+            if job.answer is not None:
+                return job.answer
 
             conversation = session.scalar(
                 select(Conversation).where(Conversation.id == job.conversation_id).with_for_update()
@@ -362,6 +405,114 @@ class ApplicationRepository:
                 ],
             }
 
+    def list_conversations(
+        self, tenant_id: uuid.UUID, user_id: uuid.UUID, offset: int, limit: int
+    ) -> list[dict[str, Any]]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(Conversation)
+                .where(
+                    Conversation.tenant_id == tenant_id,
+                    Conversation.user_id == user_id,
+                )
+                .order_by(Conversation.updated_at.desc())
+                .offset(offset)
+                .limit(limit)
+            ).all()
+            return [
+                {
+                    "conversation_id": str(row.id),
+                    "title": row.title,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                }
+                for row in rows
+            ]
+
+    def request_cancel(self, job_id: uuid.UUID, tenant_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+        with self.session_factory.begin() as session:
+            job = session.scalar(
+                select(InferenceJob)
+                .where(
+                    InferenceJob.id == job_id,
+                    InferenceJob.tenant_id == tenant_id,
+                    InferenceJob.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if job is None:
+                raise ConversationAccessError("Inference job was not found.")
+            if job.status not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
+                return False
+            job.cancel_requested = True
+            if job.status == JobStatus.QUEUED.value:
+                job.status = JobStatus.CANCELLED.value
+                job.completed_at = datetime.now(UTC)
+            return True
+
+    def mark_cancelled(self, job_id: uuid.UUID, lease_token: uuid.UUID) -> bool:
+        with self.session_factory.begin() as session:
+            job = session.scalar(
+                select(InferenceJob)
+                .where(
+                    InferenceJob.id == job_id,
+                    InferenceJob.lease_token == lease_token,
+                    InferenceJob.cancel_requested.is_(True),
+                )
+                .with_for_update()
+            )
+            if job is None:
+                return False
+            job.status = JobStatus.CANCELLED.value
+            job.completed_at = datetime.now(UTC)
+            job.lease_owner = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            return True
+
+    def create_feedback(
+        self,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        answer_id: uuid.UUID,
+        rating: int,
+        comment: str | None,
+    ):
+        from app.state.models import AnswerFeedback
+
+        with self.session_factory.begin() as session:
+            owned = session.scalar(
+                select(Answer.id)
+                .join(InferenceJob, InferenceJob.id == Answer.job_id)
+                .where(
+                    Answer.id == answer_id,
+                    InferenceJob.tenant_id == tenant_id,
+                    InferenceJob.user_id == user_id,
+                )
+            )
+            if owned is None:
+                raise ConversationAccessError("Answer was not found.")
+            row = session.scalar(
+                select(AnswerFeedback).where(
+                    AnswerFeedback.answer_id == answer_id,
+                    AnswerFeedback.user_id == user_id,
+                )
+            )
+            if row is None:
+                row = AnswerFeedback(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    answer_id=answer_id,
+                    rating=rating,
+                    comment=comment,
+                )
+                session.add(row)
+            else:
+                row.rating = rating
+                row.comment = comment
+            session.flush()
+            return row
+
 
 class AsyncApplicationRepository:
     """Non-blocking API adapter around the transactional sync repository."""
@@ -370,24 +521,44 @@ class AsyncApplicationRepository:
         self.repository = repository
 
     async def get_compatibility_identity(self, tenant_slug: str, user_external_id: str):
-        return await asyncio.to_thread(
+        return await api_blocking_io.call(
             self.repository.get_compatibility_identity, tenant_slug, user_external_id
         )
 
     async def create_job(self, **kwargs):
-        return await asyncio.to_thread(self.repository.create_job, **kwargs)
+        return await api_blocking_io.call(self.repository.create_job, **kwargs)
 
     async def get_job(self, job_id: uuid.UUID):
-        return await asyncio.to_thread(self.repository.get_job, job_id)
+        return await api_blocking_io.call(self.repository.get_job, job_id)
 
     async def get_job_for_owner(self, job_id: uuid.UUID, tenant_id: uuid.UUID, user_id: uuid.UUID):
-        return await asyncio.to_thread(
+        return await api_blocking_io.call(
             self.repository.get_job_for_owner, job_id, tenant_id, user_id
         )
 
     async def conversation_history(
         self, conversation_id: uuid.UUID, tenant_id: uuid.UUID, user_id: uuid.UUID
     ):
-        return await asyncio.to_thread(
+        return await api_blocking_io.call(
             self.repository.conversation_history, conversation_id, tenant_id, user_id
+        )
+
+    async def list_conversations(self, tenant_id, user_id, offset, limit):
+        return await api_blocking_io.call(
+            self.repository.list_conversations, tenant_id, user_id, offset, limit
+        )
+
+    async def request_cancel(self, job_id, tenant_id, user_id):
+        return await api_blocking_io.call(
+            self.repository.request_cancel, job_id, tenant_id, user_id
+        )
+
+    async def create_feedback(self, tenant_id, user_id, answer_id, rating, comment):
+        return await api_blocking_io.call(
+            self.repository.create_feedback,
+            tenant_id,
+            user_id,
+            answer_id,
+            rating,
+            comment,
         )

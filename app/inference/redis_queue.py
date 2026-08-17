@@ -38,6 +38,8 @@ class RedisInferenceQueue:
         return await self.redis.xadd(
             settings.inference_jobs_stream,
             {"contract": contract.model_dump_json()},
+            maxlen=settings.redis_stream_maxlen,
+            approximate=True,
         )
 
     async def read_jobs(self, worker_id: str, count: int = 1) -> list[tuple[str, dict]]:
@@ -126,6 +128,8 @@ class RedisInferenceQueue:
                 "error_code": error_code[:100],
                 "message": message[:500],
             },
+            maxlen=settings.redis_stream_maxlen,
+            approximate=True,
         )
 
     async def heartbeat(self, payload: dict) -> None:

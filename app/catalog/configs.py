@@ -186,7 +186,7 @@ class JDBCMetadataPolicy(BaseModel):
 class JDBCSourceConfig(SourceConfigBase):
     source_type: Literal["jdbc"] = "jdbc"
     driver_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
-    driver_registry_version: Literal["1"] = "1"
+    driver_registry_version: str = Field(default="1", min_length=1, max_length=20)
     connection_ref: str = Field(min_length=3, max_length=255)
     jdbc_url: str = Field(min_length=10, max_length=2000)
     host_allowlist: list[str] = Field(min_length=1, max_length=100)
@@ -233,21 +233,14 @@ class JDBCSourceConfig(SourceConfigBase):
         if self.credential_ref is not None:
             raise ValueError("JDBC sources use connection_ref instead of credential_ref.")
         parsed = parse_jdbc_url(self.jdbc_url)
-        if parsed.dialect != "postgresql":
-            raise ValueError("Only the managed PostgreSQL JDBC driver is currently supported.")
-        if self.driver_id != "postgresql":
-            raise ValueError("driver_id is not present in the managed driver registry.")
         if parsed.host not in self.host_allowlist:
             raise ValueError("JDBC host must be explicitly listed in host_allowlist.")
         if not parsed.database or parsed.database not in self.database_allowlist:
             raise ValueError("JDBC database must be explicitly listed in database_allowlist.")
         if parsed.database not in self.catalog_allowlist:
             raise ValueError("PostgreSQL database must be listed in catalog_allowlist.")
-        properties = {key.casefold(): value for key, value in parsed.properties.items()}
-        if set(properties) - {"sslmode"}:
-            raise ValueError("jdbc_url contains a property not allowed by the driver registry.")
-        if properties.get("sslmode", "").casefold() != "verify-full":
-            raise ValueError("PostgreSQL JDBC metadata connections require sslmode=verify-full.")
+        if parsed.properties != {"sslmode": "verify-full"}:
+            raise ValueError("JDBC PostgreSQL sources require only sslmode=verify-full.")
         return self
 
 
@@ -255,7 +248,7 @@ SourceConfig = Annotated[
     WebsiteSourceConfig | GitSourceConfig | JDBCSourceConfig,
     Field(discriminator="source_type"),
 ]
-SOURCE_CONFIG_ADAPTER = TypeAdapter(SourceConfig)
+SOURCE_CONFIG_ADAPTER: TypeAdapter[SourceConfig] = TypeAdapter(SourceConfig)
 
 
 def parse_source_config(value: dict[str, Any]) -> SourceConfig:

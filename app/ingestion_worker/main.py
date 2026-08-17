@@ -11,6 +11,7 @@ from app.catalog.repository import CatalogRepository, LeaseLostError
 from app.connectors.base import EnvironmentCredentialResolver, TransientConnectorError
 from app.connectors.git import GitConnector
 from app.connectors.jdbc import JDBCMetadataConnector
+from app.connectors.jdbc_registry import ManagedDriverRegistry
 from app.connectors.website import WebsiteConnector
 from app.ingestion.contracts import IngestionEvent, IngestionJobContract
 from app.ingestion.pipeline import IngestionCancelled, IngestionPipeline
@@ -20,12 +21,15 @@ from app.state.models import IngestionRunStatus
 
 
 class IngestionWorker:
-    def __init__(self, repository, queue, pipeline, worker_id: str | None = None):
+    def __init__(
+        self, repository, queue, pipeline, worker_id: str | None = None, auto_indexer=None
+    ):
         self.repository = repository
         self.queue = queue
         self.pipeline = pipeline
         self.worker_id = worker_id or settings.ingestion_worker_id
         self.stop_event = asyncio.Event()
+        self.auto_indexer = auto_indexer
 
     async def _event(self, contract, event_type: str, stage: str | None = None) -> None:
         await self.queue.publish_event(
@@ -95,6 +99,8 @@ class IngestionWorker:
             )
             if completed:
                 await self._event(contract, "completed", "complete")
+                if self.auto_indexer is not None:
+                    await self.auto_indexer(contract)
                 await self.queue.ack(message_id)
         except IngestionCancelled:
             cancelled = await asyncio.to_thread(
@@ -185,16 +191,54 @@ class IngestionWorker:
 
 async def async_main() -> None:
     engine = create_database_engine()
-    repository = CatalogRepository(create_session_factory(engine))
+    session_factory = create_session_factory(engine)
+    repository = CatalogRepository(session_factory)
     resolver = EnvironmentCredentialResolver()
     pipeline = IngestionPipeline(
         repository,
         WebsiteConnector(resolver),
         GitConnector(resolver),
-        JDBCMetadataConnector(resolver),
+        JDBCMetadataConnector(resolver, registry=ManagedDriverRegistry(session_factory)),
     )
     queue = RedisIngestionQueue()
-    worker = IngestionWorker(repository, queue, pipeline)
+    from app.indexing.contracts import IndexingJobContract
+    from app.indexing.redis_queue import RedisIndexingQueue
+    from app.indexing.repository import IndexRepository
+
+    index_repository = IndexRepository(session_factory)
+    indexing_queue = RedisIndexingQueue()
+    await indexing_queue.ensure_group()
+
+    async def auto_index(contract):
+        knowledge_bases = await asyncio.to_thread(
+            repository.knowledge_base_ids_for_source,
+            contract.tenant_id,
+            contract.source_id,
+        )
+        for knowledge_base_id in knowledge_bases:
+            key = f"source-version:{contract.source_version_id}:kb:{knowledge_base_id}"
+            request_hash = __import__("hashlib").sha256(key.encode()).hexdigest()
+            run, created = await asyncio.to_thread(
+                index_repository.create_run,
+                contract.tenant_id,
+                knowledge_base_id,
+                key,
+                request_hash,
+                settings.indexing_max_attempts,
+            )
+            if created:
+                await indexing_queue.enqueue(
+                    IndexingJobContract(
+                        run_id=run.id,
+                        tenant_id=contract.tenant_id,
+                        knowledge_base_id=knowledge_base_id,
+                        index_version_id=run.index_version_id,
+                        correlation_id=contract.correlation_id,
+                        auto_activate=True,
+                    )
+                )
+
+    worker = IngestionWorker(repository, queue, pipeline, auto_indexer=auto_index)
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signal_name, worker.stop_event.set)
@@ -202,6 +246,7 @@ async def async_main() -> None:
         await worker.run()
     finally:
         await queue.close()
+        await indexing_queue.close()
         engine.dispose()
 
 

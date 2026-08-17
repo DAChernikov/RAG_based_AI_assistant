@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
+import psycopg
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.connectors.base import ConnectorError
+from app.state.models import JDBCDriverRegistryEntry
 
 
 class ManagedDriverError(ConnectorError):
@@ -20,29 +27,46 @@ class ManagedDriver:
     allowed_properties: frozenset[str]
 
 
-POSTGRESQL_DRIVER = ManagedDriver(
-    driver_id="postgresql",
-    registry_version="1",
-    dialect="postgresql",
-    adapter="psycopg",
-    adapter_version="3.2.4",
-    manifest_checksum="e7be8ed45d683286c9ec548c1528e86c777b7fc6bdb6542f4d4c1c4b58e23c90",
-    allowed_properties=frozenset({"sslmode"}),
-)
+def manifest_checksum(driver: ManagedDriver) -> str:
+    payload = {
+        "adapter": driver.adapter,
+        "adapter_version": driver.adapter_version,
+        "allowed_properties": sorted(driver.allowed_properties),
+        "dialect": driver.dialect,
+        "driver_id": driver.driver_id,
+        "registry_version": driver.registry_version,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class ManagedDriverRegistry:
-    """Allowlist of reviewed, preinstalled metadata adapters.
+    """Database-backed allowlist of reviewed, preinstalled metadata adapters."""
 
-    Registry entries are versioned. No source configuration can provide an adapter,
-    module path, JAR path or arbitrary connection property.
-    """
-
-    def __init__(self, drivers: tuple[ManagedDriver, ...] = (POSTGRESQL_DRIVER,)):
-        self._drivers = {(driver.driver_id, driver.registry_version): driver for driver in drivers}
+    def __init__(self, session_factory: sessionmaker[Session]):
+        self.session_factory = session_factory
 
     def require(self, driver_id: str, registry_version: str) -> ManagedDriver:
-        driver = self._drivers.get((driver_id, registry_version))
-        if driver is None:
-            raise ManagedDriverError("JDBC driver is not present in the managed registry.")
+        with self.session_factory() as session:
+            entry = session.scalar(
+                select(JDBCDriverRegistryEntry).where(
+                    JDBCDriverRegistryEntry.driver_id == driver_id,
+                    JDBCDriverRegistryEntry.registry_version == registry_version,
+                )
+            )
+        if entry is None or not entry.is_enabled:
+            raise ManagedDriverError("JDBC driver is not enabled in the managed registry.")
+        driver = ManagedDriver(
+            driver_id=entry.driver_id,
+            registry_version=entry.registry_version,
+            dialect=entry.dialect,
+            adapter=entry.adapter,
+            adapter_version=entry.adapter_version,
+            manifest_checksum=entry.manifest_checksum,
+            allowed_properties=frozenset(item.casefold() for item in entry.allowed_properties),
+        )
+        if driver.adapter != "psycopg" or driver.adapter_version != psycopg.__version__:
+            raise ManagedDriverError("JDBC adapter version does not match the reviewed runtime.")
+        if manifest_checksum(driver) != driver.manifest_checksum:
+            raise ManagedDriverError("JDBC driver manifest checksum validation failed.")
         return driver

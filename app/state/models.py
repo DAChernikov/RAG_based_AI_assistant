@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -37,6 +38,7 @@ class JobStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class UserRole(str, enum.Enum):
@@ -62,6 +64,24 @@ class SourceVersionStatus(str, enum.Enum):
 
 
 class IngestionRunStatus(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class IndexVersionStatus(str, enum.Enum):
+    CREATED = "created"
+    INDEXING = "indexing"
+    VALIDATING = "validating"
+    READY = "ready"
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    FAILED = "failed"
+
+
+class IndexingRunStatus(str, enum.Enum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -204,6 +224,7 @@ class InferenceJob(TimestampMixin, Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(255))
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     queued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -578,6 +599,265 @@ class DocumentChunk(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSON, default=dict, nullable=False
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class EmbeddingModelVersion(Base):
+    __tablename__ = "embedding_model_versions"
+    __table_args__ = (UniqueConstraint("model_id", "version", name="uq_embedding_model_version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(20), nullable=False, default="1.0")
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class KnowledgeIndexVersion(Base):
+    __tablename__ = "knowledge_index_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_base_id", "version_number", name="uq_knowledge_index_version_number"
+        ),
+        Index("ix_knowledge_index_tenant_kb_status", "tenant_id", "knowledge_base_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    embedding_model_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("embedding_model_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    failure_code: Mapped[str | None] = mapped_column(String(100))
+    failure_message: Mapped[str | None] = mapped_column(String(500))
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ChunkEmbedding(Base):
+    __tablename__ = "chunk_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "text_checksum",
+            "embedding_model_version_id",
+            name="uq_chunk_embeddings_reuse",
+        ),
+        Index("ix_chunk_embeddings_tenant_checksum", "tenant_id", "text_checksum"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    embedding_model_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("embedding_model_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    text_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(1024), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class KnowledgeIndexEntry(Base):
+    __tablename__ = "knowledge_index_entries"
+    __table_args__ = (
+        UniqueConstraint("index_version_id", "chunk_id", name="uq_index_entries_chunk"),
+        Index("ix_index_entries_tenant_version", "tenant_id", "index_version_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    index_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_index_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    source_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("normalized_documents.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("document_chunks.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_embedding_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("chunk_embeddings.id", ondelete="RESTRICT"), nullable=False
+    )
+    canonical_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    path: Mapped[str | None] = mapped_column(String(1000))
+    schema_name: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IndexingRun(Base):
+    __tablename__ = "indexing_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_indexing_runs_tenant_key"),
+        Index("ix_indexing_runs_status_lease", "status", "lease_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    index_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_index_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IndexingEvent(Base):
+    __tablename__ = "indexing_events"
+    __table_args__ = (Index("ix_indexing_events_run_created", "run_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("indexing_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SourceSchedule(TimestampMixin, Base):
+    __tablename__ = "source_schedules"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "source_id", name="uq_source_schedules_tenant_source"),
+        Index("ix_source_schedules_due", "is_enabled", "next_run_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RetentionPolicy(TimestampMixin, Base):
+    __tablename__ = "retention_policies"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_versions_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90)
+    index_versions_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90)
+    run_history_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    audit_days: Mapped[int] = mapped_column(Integer, nullable=False, default=365)
+
+
+class ModelDefinition(TimestampMixin, Base):
+    __tablename__ = "model_definitions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "role", "model_id", "version", name="uq_models_version"),
+        Index("ix_models_active", "tenant_id", "role", "is_active"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    endpoint_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    credential_ref: Mapped[str | None] = mapped_column(String(255))
+    capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    config_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class PromptTemplate(TimestampMixin, Base):
+    __tablename__ = "prompt_templates"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", "version", name="uq_prompts_version"),
+        Index("ix_prompts_active", "tenant_id", "name", "is_active"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class AnswerFeedback(Base):
+    __tablename__ = "answer_feedback"
+    __table_args__ = (UniqueConstraint("answer_id", "user_id", name="uq_feedback_answer_user"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("answers.id", ondelete="CASCADE"), nullable=False
+    )
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    comment: Mapped[str | None] = mapped_column(String(1000))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

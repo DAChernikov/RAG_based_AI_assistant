@@ -25,9 +25,10 @@ async def admin_runtime(
         )
     runtime = getattr(request.app.state, "runtime", {})
     return {
-        "artifacts_ready": bool(runtime.get("artifacts_ready", False)),
-        "rag_ready": bool(runtime.get("rag_ready", False)),
         "llm_name": runtime.get("llm_name"),
-        "artifacts_dir": runtime.get("artifacts_dir"),
         "startup_error": runtime.get("startup_error"),
+        "execution_mode": "queued",
+        "database_configured": runtime.get("database_engine") is not None,
+        "redis_configured": runtime.get("queue") is not None,
+        "embedding_configured": runtime.get("embedding_client") is not None,
     }

@@ -69,19 +69,19 @@ def parse_jdbc_url(value: str) -> ParsedJDBCUrl:
         if "@" in endpoint:
             raise ValueError("jdbc_url must not contain embedded credentials.")
         parsed = urlsplit(f"sqlserver://{endpoint}")
-        properties: dict[str, str] = {}
+        sqlserver_properties: dict[str, str] = {}
         for item in raw_properties:
             if not item:
                 continue
             if "=" not in item:
                 raise ValueError("SQL Server JDBC properties must use key=value syntax.")
             key, property_value = item.split("=", 1)
-            properties[key.strip()] = property_value.strip()
-        _reject_secret_properties(properties)
+            sqlserver_properties[key.strip()] = property_value.strip()
+        _reject_secret_properties(sqlserver_properties)
         database = next(
             (
                 property_value
-                for key, property_value in properties.items()
+                for key, property_value in sqlserver_properties.items()
                 if re.sub(r"[^a-z0-9]", "", key.casefold()) in {"database", "databasename"}
             ),
             None,
@@ -91,7 +91,7 @@ def parse_jdbc_url(value: str) -> ParsedJDBCUrl:
             host=(parsed.hostname or "").casefold() or None,
             port=parsed.port,
             database=database,
-            properties=properties,
+            properties=sqlserver_properties,
         )
 
     if lower.startswith("jdbc:oracle:thin:"):

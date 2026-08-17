@@ -5,7 +5,7 @@ import hashlib
 import ipaddress
 import json
 import socket
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import psycopg
@@ -93,16 +93,19 @@ ORDER BY n.nspname, c.relname, i.relname
 _CONSTRAINT_TYPES = {"p": "primary_key", "f": "foreign_key", "u": "unique"}
 
 
-async def resolve_public_database_host(host: str) -> None:
+async def resolve_public_database_host(host: str) -> tuple[str, ...]:
     rows = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     if not rows:
         raise SSRFProtectionError("Database host did not resolve.")
+    addresses = []
     for row in rows:
-        address = ipaddress.ip_address(row[4][0])
+        address = ipaddress.ip_address(str(row[4][0]).split("%", 1)[0])
         if not address.is_global:
             raise SSRFProtectionError(
                 "Private, link-local and metadata database addresses are blocked."
             )
+        addresses.append(address.compressed)
+    return tuple(sorted(set(addresses), key=lambda value: (":" in value, value)))
 
 
 class JDBCMetadataConnector:
@@ -112,12 +115,12 @@ class JDBCMetadataConnector:
         self,
         credential_resolver: CredentialResolver,
         *,
-        registry: ManagedDriverRegistry | None = None,
+        registry: ManagedDriverRegistry,
         connection_factory: Callable[..., Any] = psycopg.connect,
-        host_validator=resolve_public_database_host,
+        host_validator: Callable[[str], Awaitable[tuple[str, ...]]] = resolve_public_database_host,
     ):
         self.credential_resolver = credential_resolver
-        self.registry = registry or ManagedDriverRegistry()
+        self.registry = registry
         self.connection_factory = connection_factory
         self.host_validator = host_validator
 
@@ -141,7 +144,9 @@ class JDBCMetadataConnector:
             raise CredentialIsolationError("JDBC connection property is not allowed.")
         if parsed.properties.get("sslmode", "").casefold() != "verify-full":
             raise CredentialIsolationError("TLS certificate and hostname verification is required.")
-        await self.host_validator(parsed.host)
+        verified_addresses = await self.host_validator(parsed.host)
+        if not verified_addresses:
+            raise SSRFProtectionError("Database host did not resolve to a verified public IP.")
 
         credentials = validate_credential_material(
             await self.credential_resolver.resolve(config.connection_ref)
@@ -159,6 +164,7 @@ class JDBCMetadataConnector:
 
         connection_parameters: dict[str, Any] = {
             "host": parsed.host,
+            "hostaddr": verified_addresses[0],
             "port": parsed.port or 5432,
             "dbname": parsed.database,
             "user": username,
@@ -212,7 +218,7 @@ class JDBCMetadataConnector:
     def _read_metadata(
         self, config: JDBCSourceConfig, connection_parameters: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        relation_kinds = []
+        relation_kinds: list[str] = []
         if config.metadata_policy.include_tables:
             relation_kinds.extend(("r", "p"))
         if config.metadata_policy.include_views:
@@ -297,7 +303,7 @@ class JDBCMetadataConnector:
             f"{parsed.database}/{schema}/{name}"
         )
         text = json.dumps(relation, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        chunks = []
+        chunks: list[ParsedChunk] = []
         overview = {
             key: relation[key]
             for key in ("schema_name", "relation_name", "relation_kind", "comment")

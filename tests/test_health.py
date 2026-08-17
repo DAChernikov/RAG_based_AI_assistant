@@ -23,9 +23,9 @@ def test_ready():
 
     payload = response.json()
     assert "status" in payload
-    assert "artifacts_ready" in payload
-    assert "rag_ready" in payload
-    assert "startup_error" in payload
+    assert payload["execution_mode"] == "queued"
+    assert "components" in payload
+    assert "database" in payload["components"]
 
 
 class FakeQueue:
@@ -45,6 +45,11 @@ class FakeQueue:
         }
 
 
+class FakeEmbedding:
+    async def readiness(self):
+        return {"status": "ready", "model_ready": True}
+
+
 def test_queued_ready_uses_worker_heartbeat(monkeypatch):
     queued_app = FastAPI()
     queued_app.include_router(health.router)
@@ -53,6 +58,7 @@ def test_queued_ready_uses_worker_heartbeat(monkeypatch):
         "execution_mode": "queued",
         "database_engine": object(),
         "queue": FakeQueue(),
+        "embedding_client": FakeEmbedding(),
         "startup_error": None,
     }
     monkeypatch.setattr("app.api.routes.health.database_is_ready", lambda engine: True)
@@ -61,5 +67,5 @@ def test_queued_ready_uses_worker_heartbeat(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["status"] == "ready"
-    assert response.json()["worker_ready"] is True
-    assert response.json()["model_ready"] is True
+    assert response.json()["components"]["inference_worker"] == "ready"
+    assert response.json()["components"]["generation_model"] == "ready"
