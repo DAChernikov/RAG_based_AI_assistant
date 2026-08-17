@@ -1,4 +1,6 @@
 PYTHON_PATHS = app tests migrations/env.py migrations/versions research/src
+DOCKER_COMPOSE ?= docker compose
+COMPOSE_ARGS ?=
 
 install:
 	poetry install --with bot,embedding,research,dev
@@ -35,7 +37,13 @@ seed-dev:
 	poetry run python -m app.state.seed
 
 bootstrap-admin:
-	poetry run python -m app.state.bootstrap_admin \
+	@test -n "$(TENANT_SLUG)" || (echo "TENANT_SLUG is required"; exit 2)
+	@test -n "$(TENANT_NAME)" || (echo "TENANT_NAME is required"; exit 2)
+	@test -n "$(ADMIN_USERNAME)" || (echo "ADMIN_USERNAME is required"; exit 2)
+	@test -n "$(ADMIN_DISPLAY_NAME)" || (echo "ADMIN_DISPLAY_NAME is required"; exit 2)
+	@test -n "$$BOOTSTRAP_ADMIN_PASSWORD" || (echo "BOOTSTRAP_ADMIN_PASSWORD is required"; exit 2)
+	$(DOCKER_COMPOSE) $(COMPOSE_ARGS) exec -T -e BOOTSTRAP_ADMIN_PASSWORD api \
+		python -m app.state.bootstrap_admin \
 		--tenant-slug "$(TENANT_SLUG)" \
 		--tenant-name "$(TENANT_NAME)" \
 		--username "$(ADMIN_USERNAME)" \

@@ -29,6 +29,18 @@ def test_compose_has_final_workers_without_legacy_artifact_mount():
     )
 
 
+def test_default_compose_warms_embedding_before_api_can_start():
+    repository_root = Path(__file__).resolve().parents[1]
+    compose = yaml.safe_load((repository_root / "docker-compose.yml").read_text())
+    embedding = compose["services"]["embedding-service"]
+    api = compose["services"]["api"]
+
+    assert embedding["environment"]["EMBEDDING_WARMUP"] == "${EMBEDDING_WARMUP:-true}"
+    assert "/ready" in " ".join(embedding["healthcheck"]["test"])
+    assert embedding["healthcheck"]["start_period"] == ("${EMBEDDING_HEALTH_START_PERIOD:-30m}")
+    assert api["depends_on"]["embedding-service"]["condition"] == "service_healthy"
+
+
 def test_helm_uses_split_immutable_images_and_restricted_networking():
     root = Path(__file__).resolve().parents[1] / "deploy/helm/rag-assistant"
     values = yaml.safe_load((root / "values.yaml").read_text())

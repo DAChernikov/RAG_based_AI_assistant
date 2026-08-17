@@ -2,8 +2,8 @@
 
 This is the single manual acceptance path for a release. Use a local fake website, a disposable local Git repository and a disposable tenant; never production credentials.
 
-1. Copy `.env.example`, start native Ollama or llama.cpp with Qwen, then `docker compose up --build`. Confirm every service is healthy and `/ready` is sanitized.
-2. Bootstrap tenant `acceptance` and admin using `read -s ADMIN_PASSWORD` plus `make bootstrap-admin`. Log in at `http://localhost:8080`; confirm refresh survives a page reload and logout invalidates the session.
+1. Copy `.env.example`, start native Ollama or llama.cpp with Qwen, then `docker compose up --build`. On a cold cache, watch `docker compose logs -f embedding-service`: Compose starts BGE-M3 warmup automatically and `/ready` must remain unavailable until the model is loaded. Confirm every service is healthy and the final `/ready` response is sanitized.
+2. Bootstrap tenant `acceptance` inside the API container: run `read -rs BOOTSTRAP_ADMIN_PASSWORD; echo; export BOOTSTRAP_ADMIN_PASSWORD`, then `TENANT_SLUG=acceptance TENANT_NAME=Acceptance ADMIN_USERNAME=admin ADMIN_DISPLAY_NAME=Administrator make bootstrap-admin`, followed by `unset BOOTSTRAP_ADMIN_PASSWORD`. Log in at `http://localhost:8080`; confirm refresh survives a page reload and logout invalidates the session.
 3. Create a user and a scoped API key; copy the full key once. Confirm it is not shown on reload and a revoked key returns 401.
 4. Create a knowledge base. Register a local Website source and a local Git source with the typed forms, include/exclude rules and credential references, link both, refresh them and inspect progress/events in **Индексация**. Exercise cancel on a disposable refresh; activate/rollback/pin versions where appropriate. No step requires pasting arbitrary JSON.
 5. Start indexing. Confirm run reaches active, sources/provenance are visible and a second identical request does not create duplicate content/embeddings.

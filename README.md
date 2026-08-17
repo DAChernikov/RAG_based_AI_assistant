@@ -21,12 +21,14 @@ curl -fsS http://localhost:8080/health
 curl -fsS http://localhost:8080/ready
 ```
 
-На macOS generation server остаётся нативным и доступен контейнерам по `host.docker.internal:11434`. Для нативного embedding endpoint используйте `-f compose.native-models.yml`; dev-порты БД/Redis включаются только через `-f compose.dev.yml`. Создание первого администратора:
+Default Compose запускает CPU embedding service с `EMBEDDING_WARMUP=true`: на пустом `model_cache` он загружает BGE-M3, и `/ready` остаётся `503` до фактической загрузки модели. Первый запуск может занять десятки минут; `EMBEDDING_HEALTH_START_PERIOD` по умолчанию равен `30m`. API стартует только после успешной embedding readiness, но warmup начинается независимо в самом embedding-контейнере, поэтому ожидание не образует deadlock.
+
+На macOS generation server остаётся нативным и доступен контейнерам по `host.docker.internal:11434`. Для заранее запущенного нативного embedding endpoint используйте `-f compose.native-models.yml`; dev-порты БД/Redis включаются только через `-f compose.dev.yml`. Создание первого администратора выполняется внутри уже запущенного API-контейнера:
 
 ```bash
-read -s ADMIN_PASSWORD; export ADMIN_PASSWORD
+read -rs BOOTSTRAP_ADMIN_PASSWORD; echo; export BOOTSTRAP_ADMIN_PASSWORD
 TENANT_SLUG=acme TENANT_NAME=Acme ADMIN_USERNAME=admin ADMIN_DISPLAY_NAME=Administrator make bootstrap-admin
-unset ADMIN_PASSWORD
+unset BOOTSTRAP_ADMIN_PASSWORD
 ```
 
 Откройте `http://localhost:8080`, войдите, создайте knowledge base, source, выполните refresh/indexing и задайте вопрос. Полный проверочный путь: [owner acceptance](docs/testing/owner-acceptance.md).

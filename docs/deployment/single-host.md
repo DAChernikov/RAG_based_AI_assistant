@@ -9,7 +9,7 @@ This runbook assumes one hardened Linux host, Docker Engine/Compose, a DNS name 
 3. Point DNS to the host. Terminate TLS with Caddy/Nginx/Traefik, redirect HTTP to HTTPS, automate ACME renewal and proxy only Web/API traffic. Set the exact HTTPS origin and trusted proxy CIDRs.
 4. Copy `.env.production.example` to a root-readable secret file outside the checkout. Replace every placeholder. Prefer Docker secrets for passwords/tokens. Validate it before contacting any dependency with `docker compose --env-file /run/secrets/rag.env run --rm --no-deps api python -m app.state.validate_config`. Validation reports field names only, never values.
 5. Create a PostgreSQL 16 database/user with only application-schema privileges and `CREATE EXTENSION vector`; require TLS. Configure Redis 7 auth/TLS, AOF, `noeviction` and memory alerts.
-6. Preload Qwen and BGE-M3 weights into model-service storage, verify origin/checksum, start their HTTP services and test `/health`, `/ready`, `/v1/models` or `/v1/embeddings`. Never download weights during API startup.
+6. Preload Qwen and BGE-M3 weights into model-service storage and verify origin/checksum. Default Compose runs `EMBEDDING_WARMUP=true`; if its persistent cache is empty, the embedding container downloads/loads BGE-M3 during its own startup while `/ready` remains unavailable. The API itself never downloads model weights and waits for successful embedding readiness. For external model services, start them first and test `/health`, `/ready`, `/v1/models` or `/v1/embeddings`.
 
 ## Deploy
 
@@ -24,15 +24,15 @@ docker compose --env-file /run/secrets/rag.env up -d --no-build embedding-servic
 docker compose --env-file /run/secrets/rag.env ps
 ```
 
-Set every `*_IMAGE` variable to a reviewed immutable `repository@sha256:digest`; `pull` plus `--no-build` prevents production from building a mutable checkout. If PostgreSQL/Redis/models are external, use a private override file that removes local services and injects TLS URLs. Bootstrap admin without putting the password on the command line:
+Set every `*_IMAGE` variable to a reviewed immutable `repository@sha256:digest`; `pull` plus `--no-build` prevents production from building a mutable checkout. If PostgreSQL/Redis/models are external, use a private override file that removes local services and injects TLS URLs. Bootstrap admin inside the running API container without putting the password value on the command line:
 
 ```bash
-read -s ADMIN_PASSWORD; export ADMIN_PASSWORD
-docker compose --env-file /run/secrets/rag.env run --rm \
-  -e ADMIN_PASSWORD -e TENANT_SLUG=acme -e TENANT_NAME=Acme \
-  -e ADMIN_USERNAME=admin -e ADMIN_DISPLAY_NAME=Administrator api \
-  python -m app.state.bootstrap_admin
-unset ADMIN_PASSWORD
+read -rs BOOTSTRAP_ADMIN_PASSWORD; echo; export BOOTSTRAP_ADMIN_PASSWORD
+COMPOSE_ARGS="--env-file /run/secrets/rag.env" \
+  TENANT_SLUG=acme TENANT_NAME=Acme \
+  ADMIN_USERNAME=admin ADMIN_DISPLAY_NAME=Administrator \
+  make bootstrap-admin
+unset BOOTSTRAP_ADMIN_PASSWORD
 ```
 
 Check HTTPS `/health`, sanitized `/ready`, login, source refresh, indexing and cited chat. Create a scoped Telegram API key only after this smoke test. Enable service restart, host backups, Prometheus scraping and OTLP export.

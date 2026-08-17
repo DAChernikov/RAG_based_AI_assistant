@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException, Response
@@ -114,19 +114,31 @@ def create_app(
     semaphore = asyncio.Semaphore(config.embedding_concurrency)
     admission = asyncio.Semaphore(config.embedding_concurrency + config.embedding_max_queue)
 
+    async def warmup_backend(warmup) -> None:
+        try:
+            await warmup()
+        except Exception:
+            log_event(
+                "embedding_warmup_failed",
+                service="embedding",
+                status="not_ready",
+                error_code="model_load_failed",
+            )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if config.embedding_warmup and hasattr(runtime_backend, "warmup"):
-            try:
-                await runtime_backend.warmup()
-            except Exception:
-                log_event(
-                    "embedding_warmup_failed",
-                    service="embedding",
-                    status="not_ready",
-                    error_code="model_load_failed",
-                )
+        warmup_task: asyncio.Task[None] | None = None
+        warmup = getattr(runtime_backend, "warmup", None)
+        if config.embedding_warmup and warmup is not None:
+            # The server must expose liveness while a cold model is loading. Readiness stays
+            # false until LocalBGEBackend._load has installed the fully initialized model.
+            warmup_task = asyncio.create_task(warmup_backend(warmup), name="embedding-model-warmup")
         yield
+        if warmup_task is not None:
+            if not warmup_task.done():
+                warmup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup_task
         await runtime_backend.close()
 
     application = FastAPI(title="Self-hosted embedding service", version="1.0.0", lifespan=lifespan)
@@ -138,6 +150,7 @@ def create_app(
     @application.get("/ready")
     async def ready(response: Response):
         model_ready = bool(getattr(runtime_backend, "ready", backend is not None))
+        readiness_error = getattr(runtime_backend, "readiness_error", None)
         if not model_ready:
             response.status_code = 503
         return {
@@ -146,7 +159,7 @@ def create_app(
             "model": config.embedding_model,
             "model_version": config.embedding_model_version,
             "lazy_loaded": not model_ready,
-            "reason": getattr(runtime_backend, "readiness_error", None),
+            "reason": readiness_error or ("model_loading" if not model_ready else None),
         }
 
     @application.post("/v1/embeddings", response_model=EmbeddingResponse)

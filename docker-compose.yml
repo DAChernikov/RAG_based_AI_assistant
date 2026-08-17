@@ -81,13 +81,17 @@ services:
       EMBEDDING_MODEL_VERSION: ${EMBEDDING_MODEL_VERSION:-bge-m3/1}
       EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
       EMBEDDING_CONCURRENCY: ${EMBEDDING_CONCURRENCY:-1}
+      # API waits for /ready, so the container embedding profile must initiate loading itself.
+      EMBEDDING_WARMUP: ${EMBEDDING_WARMUP:-true}
       HF_HOME: /models/huggingface
     volumes: [model_cache:/models]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/ready', timeout=2)"]
       interval: 15s
-      timeout: 3s
+      timeout: 5s
       retries: 20
+      # First BGE-M3 download/load can take several minutes on a cold CPU host.
+      start_period: ${EMBEDDING_HEALTH_START_PERIOD:-30m}
     <<: *service-security
     read_only: false
     mem_limit: ${EMBEDDING_MEMORY_LIMIT:-6g}

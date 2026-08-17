@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -50,6 +52,69 @@ def test_bootstrap_rejects_existing_non_admin(command_database):
         session.add(User(tenant_id=tenant.id, username="same", display_name="Same", role="user"))
     with pytest.raises(RuntimeError, match="not an administrator"):
         bootstrap_admin.bootstrap_admin("member", "Member", "same", "Same", "long-password-value")
+
+
+def test_bootstrap_make_target_runs_in_api_container_with_required_contract():
+    makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text()
+    target = makefile.split("bootstrap-admin:", maxsplit=1)[1].split("\ntest:", maxsplit=1)[0]
+
+    assert "poetry run python" not in target
+    assert "exec -T -e BOOTSTRAP_ADMIN_PASSWORD api" in target
+    assert "python -m app.state.bootstrap_admin" in target
+    assert "$$BOOTSTRAP_ADMIN_PASSWORD" in target
+    for variable, option in (
+        ("TENANT_SLUG", "--tenant-slug"),
+        ("TENANT_NAME", "--tenant-name"),
+        ("ADMIN_USERNAME", "--username"),
+        ("ADMIN_DISPLAY_NAME", "--display-name"),
+    ):
+        assert f"$({variable})" in target
+        assert option in target
+
+
+def test_bootstrap_cli_reads_only_named_password_environment(monkeypatch, capsys):
+    captured = {}
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "container-secret")
+    monkeypatch.setattr(
+        bootstrap_admin,
+        "bootstrap_admin",
+        lambda tenant_slug, tenant_name, username, display_name, password: captured.update(
+            {
+                "tenant_slug": tenant_slug,
+                "tenant_name": tenant_name,
+                "username": username,
+                "display_name": display_name,
+                "password": password,
+            }
+        )
+        or ("tenant-id", "user-id"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bootstrap-admin",
+            "--tenant-slug",
+            "acme",
+            "--tenant-name",
+            "Acme",
+            "--username",
+            "admin",
+            "--display-name",
+            "Administrator",
+        ],
+    )
+
+    bootstrap_admin.main()
+
+    assert captured == {
+        "tenant_slug": "acme",
+        "tenant_name": "Acme",
+        "username": "admin",
+        "display_name": "Administrator",
+        "password": "container-secret",
+    }
+    assert "container-secret" not in capsys.readouterr().out
 
 
 def test_development_identity_seed_is_idempotent(command_database, monkeypatch):

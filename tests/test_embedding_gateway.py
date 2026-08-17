@@ -1,5 +1,7 @@
 import asyncio
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -64,6 +66,41 @@ def test_embedding_readiness_never_claims_ready_for_unloaded_or_failed_backend()
         assert response.json()["status"] == "not_ready"
         assert response.json()["model_ready"] is False
         assert response.json()["reason"] == "model_load_failed"
+
+
+def test_embedding_startup_warmup_loads_backend_before_ready():
+    class WarmedBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.ready = False
+            self.readiness_error = None
+            self.release = threading.Event()
+
+        async def warmup(self):
+            await asyncio.to_thread(self.release.wait)
+            self.ready = True
+
+    backend = WarmedBackend()
+    settings = EmbeddingSettings(embedding_dimensions=2, embedding_warmup=True)
+    with TestClient(create_app(backend, settings)) as client:
+        assert client.get("/health").status_code == 200
+        loading = client.get("/ready")
+        assert loading.status_code == 503
+        assert loading.json()["model_ready"] is False
+        assert loading.json()["reason"] == "model_loading"
+
+        backend.release.set()
+        deadline = time.monotonic() + 1
+        response = client.get("/ready")
+        while response.status_code != 200 and time.monotonic() < deadline:
+            time.sleep(0.01)
+            response = client.get("/ready")
+        response = client.get("/ready")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ready"
+        assert response.json()["model_ready"] is True
+
+    assert backend.closed is True
 
 
 @pytest.mark.asyncio
