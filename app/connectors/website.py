@@ -17,6 +17,7 @@ from defusedxml import ElementTree
 from defusedxml.common import DefusedXmlException
 
 from app.catalog.configs import WebsiteSourceConfig
+from app.concurrency import connector_blocking_io
 from app.connectors.base import (
     ConnectorDocument,
     CredentialIsolationError,
@@ -149,7 +150,7 @@ class _HTMLExtractor(HTMLParser):
 
 
 async def _resolve_public(host: str) -> None:
-    rows = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
+    rows = await connector_blocking_io.call(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     if not rows:
         raise SSRFProtectionError("Host did not resolve.")
     for row in rows:

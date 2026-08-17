@@ -13,9 +13,7 @@ async def test_reranker_reorders_and_falls_back_safely():
             json={"results": [{"index": 1, "relevance_score": 0.9}]},
         )
 
-    client = RerankerClient("http://reranker.test", None, 1)
-    await client.client.aclose()
-    client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = RerankerClient("http://reranker.test", None, 1, transport=httpx.MockTransport(handler))
     docs = [{"text": "a", "doc_id": "a"}, {"text": "b", "doc_id": "b"}]
     assert (await client.rerank("q", docs, 1))[0]["doc_id"] == "b"
     await client.close()
@@ -23,8 +21,6 @@ async def test_reranker_reorders_and_falls_back_safely():
     def fail(request):
         return httpx.Response(503, request=request)
 
-    fallback = RerankerClient("http://reranker.test", None, 1)
-    await fallback.client.aclose()
-    fallback.client = httpx.AsyncClient(transport=httpx.MockTransport(fail))
+    fallback = RerankerClient("http://reranker.test", None, 1, transport=httpx.MockTransport(fail))
     assert await fallback.rerank("q", docs, 1) == docs[:1]
     await fallback.close()

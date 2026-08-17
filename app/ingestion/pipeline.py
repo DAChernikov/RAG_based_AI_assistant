@@ -11,6 +11,7 @@ from app.catalog.configs import (
     parse_source_config,
 )
 from app.catalog.repository import CatalogRepository
+from app.concurrency import api_blocking_io
 from app.connectors.git import GitConnector
 from app.connectors.jdbc import JDBCMetadataConnector
 from app.connectors.website import WebsiteConnector
@@ -196,6 +197,4 @@ class IngestionPipeline:
 
     @staticmethod
     async def _call(method, *args, **kwargs):
-        import asyncio
-
-        return await asyncio.to_thread(method, *args, **kwargs)
+        return await api_blocking_io.call(method, *args, **kwargs)

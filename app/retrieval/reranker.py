@@ -6,10 +6,26 @@ import httpx
 class RerankerClient:
     """Optional self-hosted reranking capability with safe retrieval-order fallback."""
 
-    def __init__(self, base_url: str, token: str | None, timeout: float):
+    def __init__(
+        self,
+        base_url: str,
+        token: str | None,
+        timeout: float,
+        *,
+        client: httpx.AsyncClient | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        if client is not None and transport is not None:
+            raise ValueError("Pass either client or transport, not both.")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(headers=headers, timeout=timeout)
+        self._owns_client = client is None
+        self.client = client or httpx.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            transport=transport,
+            trust_env=False,
+        )
 
     async def rerank(self, query: str, documents: list[dict], top_k: int) -> list[dict]:
         try:
@@ -33,4 +49,5 @@ class RerankerClient:
             return documents[:top_k]
 
     async def close(self) -> None:
-        await self.client.aclose()
+        if self._owns_client and not self.client.is_closed:
+            await self.client.aclose()

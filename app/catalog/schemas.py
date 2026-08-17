@@ -64,6 +64,11 @@ class SourceVersionResponse(BaseModel):
     content_checksum: str | None
     created_at: datetime
     activated_at: datetime | None
+    pinned: bool = False
+
+
+class SourceVersionPinRequest(BaseModel):
+    pinned: bool
 
 
 class IngestionRunResponse(BaseModel):

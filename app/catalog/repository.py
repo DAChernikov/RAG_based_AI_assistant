@@ -397,6 +397,28 @@ class CatalogRepository:
                 )
             )
 
+    def set_version_pinned(
+        self,
+        tenant_id: uuid.UUID,
+        source_id: uuid.UUID,
+        version_id: uuid.UUID,
+        pinned: bool,
+    ) -> SourceVersion:
+        with self.session_factory.begin() as session:
+            version = session.scalar(
+                select(SourceVersion)
+                .where(
+                    SourceVersion.id == version_id,
+                    SourceVersion.source_id == source_id,
+                    SourceVersion.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            if version is None:
+                raise CatalogNotFoundError("Source version was not found.")
+            version.pinned = pinned
+            return version
+
     def transition_version(
         self,
         tenant_id: uuid.UUID,

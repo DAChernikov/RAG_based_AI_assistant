@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from app.api.config import settings
 from app.api.schemas import HealthResponse, ReadyResponse
@@ -16,7 +16,7 @@ def health() -> HealthResponse:
 
 
 @router.get("/ready", response_model=ReadyResponse)
-async def ready(request: Request) -> ReadyResponse:
+async def ready(request: Request, response: Response) -> ReadyResponse:
     runtime = getattr(request.app.state, "runtime", {})
     engine = runtime.get("database_engine")
     queue = runtime.get("queue")
@@ -46,4 +46,6 @@ async def ready(request: Request) -> ReadyResponse:
     }
     required = ("database", "redis", "inference_worker", "generation_model", "embedding_model")
     status = "ready" if all(components[item] == "ready" for item in required) else "not_ready"
+    if status != "ready":
+        response.status_code = 503
     return ReadyResponse(status=status, components=components)

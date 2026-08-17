@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import ipaddress
 import json
@@ -13,6 +12,7 @@ from psycopg.rows import dict_row
 
 from app.catalog.configs import JDBCSourceConfig
 from app.catalog.jdbc_urls import ParsedJDBCUrl, parse_jdbc_url
+from app.concurrency import connector_blocking_io
 from app.connectors.base import (
     ConnectorDocument,
     CredentialIsolationError,
@@ -94,7 +94,7 @@ _CONSTRAINT_TYPES = {"p": "primary_key", "f": "foreign_key", "u": "unique"}
 
 
 async def resolve_public_database_host(host: str) -> tuple[str, ...]:
-    rows = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
+    rows = await connector_blocking_io.call(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     if not rows:
         raise SSRFProtectionError("Database host did not resolve.")
     addresses = []
@@ -181,7 +181,9 @@ class JDBCMetadataConnector:
             if value := credentials.database_parameters.get(name):
                 connection_parameters[name] = value
         try:
-            relations = await asyncio.to_thread(self._read_metadata, config, connection_parameters)
+            relations = await connector_blocking_io.call(
+                self._read_metadata, config, connection_parameters
+            )
         except (psycopg.Error, OSError, TimeoutError) as exc:
             raise TransientConnectorError("Database metadata introspection failed.") from exc
 

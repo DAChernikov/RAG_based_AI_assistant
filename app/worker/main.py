@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.api.config import settings
 from app.api.services.llm_service import LLMRateLimitError, LLMTemporaryUnavailableError
+from app.concurrency import BoundedThreadAdapter
 from app.inference.contracts import (
     CompletedEvent,
     CompletedPayload,
@@ -33,15 +34,20 @@ from app.state.database import create_database_engine, create_session_factory
 from app.state.models import JobStatus
 from app.state.repositories import ApplicationRepository, JobCancelledError
 from app.worker.processor import InferenceProcessor
+from app.worker_healthcheck import record_local_heartbeat
 
 
 class InferenceWorker:
-    def __init__(self, repository, queue, processor, worker_id: str | None = None):
+    def __init__(
+        self, repository, queue, processor, worker_id: str | None = None, blocking_io=None
+    ):
         self.repository = repository
         self.queue = queue
         self.processor = processor
         self.worker_id = worker_id or settings.worker_id
         self.stop_event = asyncio.Event()
+        self.blocking_io = blocking_io or BoundedThreadAdapter(max_workers=4, max_pending=8)
+        self._owns_blocking_io = blocking_io is None
 
     async def _event(self, contract, event_type: str, payload: dict) -> None:
         common = {
@@ -78,7 +84,7 @@ class InferenceWorker:
             metric("dlq_count")
             return
 
-        job = self.repository.get_job(contract.job_id)
+        job = await self.blocking_io.call(self.repository.get_job, contract.job_id)
         if job is None:
             await self.queue.send_to_dlq(
                 message_id=message_id,
@@ -125,11 +131,13 @@ class InferenceWorker:
             await self.queue.ack(message_id)
             return
 
-        claimed = self.repository.claim_job(
-            contract.job_id, self.worker_id, settings.worker_lease_sec
+        claimed = await self.blocking_io.call(
+            self.repository.claim_job, contract.job_id, self.worker_id, settings.worker_lease_sec
         )
         if claimed is None:
-            exhausted = self.repository.fail_exhausted_job(contract.job_id)
+            exhausted = await self.blocking_io.call(
+                self.repository.fail_exhausted_job, contract.job_id
+            )
             if exhausted:
                 await self._event(
                     contract,
@@ -164,10 +172,11 @@ class InferenceWorker:
         try:
             result = await self.processor.execute(contract, emit)
             latency_ms = (time.monotonic() - started) * 1000
-            self.repository.complete_job(
+            await self.blocking_io.call(
+                self.repository.complete_job,
                 contract.job_id,
                 result=result,
-                model_name=settings.generation_model,
+                model_name=result.get("model_name", "registry:unknown"),
                 latency_ms=latency_ms,
                 lease_token=lease_token,
             )
@@ -188,10 +197,11 @@ class InferenceWorker:
                 final_status="completed",
             )
         except (LLMTemporaryUnavailableError, LLMRateLimitError, TimeoutError):
-            current = self.repository.get_job(contract.job_id)
+            current = await self.blocking_io.call(self.repository.get_job, contract.job_id)
             if current.attempt_count < current.max_attempts:
                 code = "temporary_inference_error"
-                retried = self.repository.mark_retry(
+                retried = await self.blocking_io.call(
+                    self.repository.mark_retry,
                     contract.job_id,
                     code,
                     "Temporary inference failure.",
@@ -215,7 +225,9 @@ class InferenceWorker:
             else:
                 await self._terminal_failure(message_id, contract, "retry_exhausted", lease_token)
         except JobCancelledError:
-            self.repository.mark_cancelled(contract.job_id, lease_token)
+            await self.blocking_io.call(
+                self.repository.mark_cancelled, contract.job_id, lease_token
+            )
             await self._event(
                 contract,
                 "failed",
@@ -243,7 +255,7 @@ class InferenceWorker:
         interval = max(1, settings.worker_lease_sec // 3)
         while True:
             await asyncio.sleep(interval)
-            renewed = await asyncio.to_thread(
+            renewed = await self.blocking_io.call(
                 self.repository.renew_job_lease,
                 job_id,
                 lease_token,
@@ -254,7 +266,9 @@ class InferenceWorker:
 
     async def _terminal_failure(self, message_id, contract, code: str, lease_token=None) -> None:
         message = "Inference job failed. See worker logs using the correlation ID."
-        if not self.repository.mark_failed(contract.job_id, code, message, lease_token):
+        if not await self.blocking_io.call(
+            self.repository.mark_failed, contract.job_id, code, message, lease_token
+        ):
             return
         await self._event(
             contract,
@@ -275,6 +289,7 @@ class InferenceWorker:
     async def _heartbeat_loop(self) -> None:
         started_at = datetime.now(UTC).isoformat()
         while not self.stop_event.is_set():
+            record_local_heartbeat("inference")
             try:
                 readiness = await self.processor.readiness()
                 await self.queue.heartbeat(
@@ -318,6 +333,8 @@ class InferenceWorker:
                 await heartbeat
             await self.processor.close()
             await self.queue.close()
+            if self._owns_blocking_io:
+                self.blocking_io.close()
 
 
 async def async_main() -> None:

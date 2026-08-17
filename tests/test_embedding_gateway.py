@@ -1,8 +1,12 @@
+import asyncio
+import sys
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.embedding_service.main import EmbeddingSettings, create_app
+from app.embedding_service.main import EmbeddingSettings, LocalBGEBackend, create_app
 from app.embeddings.client import EmbeddingClient, EmbeddingServiceError
 
 
@@ -48,6 +52,52 @@ def test_embedding_service_contract_batch_limits_and_shutdown():
     assert backend.closed is True
 
 
+def test_embedding_readiness_never_claims_ready_for_unloaded_or_failed_backend():
+    class NotReady(FakeBackend):
+        ready = False
+        readiness_error = "model_load_failed"
+
+    with TestClient(create_app(NotReady(), EmbeddingSettings(embedding_dimensions=2))) as client:
+        assert client.get("/health").json() == {"status": "ok"}
+        response = client.get("/ready")
+        assert response.status_code == 503
+        assert response.json()["status"] == "not_ready"
+        assert response.json()["model_ready"] is False
+        assert response.json()["reason"] == "model_load_failed"
+
+
+@pytest.mark.asyncio
+async def test_local_embedding_model_loads_once_under_concurrency(monkeypatch):
+    loads = []
+
+    class Array:
+        def __init__(self, values):
+            self.values = values
+
+        def astype(self, _kind):
+            return self
+
+        def tolist(self):
+            return self.values
+
+    class Model:
+        def __init__(self, name, device):
+            loads.append((name, device))
+
+        def encode(self, texts, **_kwargs):
+            return [Array([1.0, 0.0]) for _ in texts]
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=Model)
+    )
+    backend = LocalBGEBackend(EmbeddingSettings(embedding_dimensions=2))
+    first, second = await asyncio.gather(backend.encode(["a"]), backend.encode(["b"]))
+    assert first == second == [[1.0, 0.0]]
+    assert len(loads) == 1
+    assert backend.ready is True
+    await backend.close()
+
+
 @pytest.mark.asyncio
 async def test_embedding_client_retries_temporary_failure_and_omits_token():
     requests = []
@@ -59,7 +109,7 @@ async def test_embedding_client_retries_temporary_failure_and_omits_token():
         return httpx.Response(
             200,
             request=request,
-            json={"data": [{"index": 0, "embedding": [1, 0]}]},
+            json={"model": "BAAI/bge-m3", "data": [{"index": 0, "embedding": [1, 0]}]},
         )
 
     client = EmbeddingClient(
@@ -79,12 +129,38 @@ async def test_embedding_client_retries_temporary_failure_and_omits_token():
 async def test_embedding_client_token_and_malformed_response():
     def handler(request):
         assert request.headers["authorization"] == "Bearer local-token"
-        return httpx.Response(200, request=request, json={"data": []})
+        return httpx.Response(200, request=request, json={"model": "BAAI/bge-m3", "data": []})
 
     client = EmbeddingClient(
         "http://embedding.test/v1",
         "BAAI/bge-m3",
         token="local-token",
+        transport=httpx.MockTransport(handler),
+        retries=0,
+    )
+    with pytest.raises(EmbeddingServiceError):
+        await client.embed(["query"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_embedding_client_enforces_registry_version_and_dimensions():
+    def handler(request):
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "model": "BAAI/bge-m3",
+                "model_version": "wrong",
+                "data": [{"index": 0, "embedding": [1.0]}],
+            },
+        )
+
+    client = EmbeddingClient(
+        "http://embedding.test/v1",
+        "BAAI/bge-m3",
+        expected_version="bge-m3/1",
+        expected_dimensions=2,
         transport=httpx.MockTransport(handler),
         retries=0,
     )

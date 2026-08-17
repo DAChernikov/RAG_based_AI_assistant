@@ -41,14 +41,10 @@ def validate_auth_configuration() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    mode = settings.inference_execution_mode.lower()
-    if mode != "queued":
-        raise RuntimeError("INFERENCE_EXECUTION_MODE must be queued.")
     validate_auth_configuration()
     configure_tracing(settings.otel_service_name, settings.otel_exporter_otlp_endpoint)
 
     runtime: dict[str, Any] = {
-        "execution_mode": mode,
         "settings": settings,
         "llm_name": settings.generation_model,
         "database_engine": None,
@@ -90,7 +86,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime["catalog_service"] = CatalogService(catalog_repository)
         from app.operations.repository import OperationsRepository
 
-        runtime["operations_repository"] = OperationsRepository(session_factory)
+        operations_repository = OperationsRepository(session_factory)
+        runtime["operations_repository"] = operations_repository
         from app.embeddings.client import EmbeddingClient
         from app.indexing.redis_queue import RedisIndexingQueue
         from app.indexing.repository import IndexRepository
@@ -101,12 +98,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.embedding_model,
             token=settings.embedding_api_token,
             timeout=settings.embedding_request_timeout,
+            expected_version=settings.embedding_model_version,
+            expected_dimensions=settings.embedding_dimensions,
         )
         runtime["embedding_client"] = embedding_client
+        from app.operations.runtime_registry import RegistryEmbeddingGateway, RuntimeRegistry
         from app.retrieval.hybrid import HybridRetrievalRepository, HybridRetriever
 
         runtime["hybrid_retriever"] = HybridRetriever(
-            HybridRetrievalRepository(session_factory), embedding_client
+            HybridRetrievalRepository(session_factory),
+            RegistryEmbeddingGateway(RuntimeRegistry(operations_repository)),
         )
         indexing_queue = RedisIndexingQueue()
         await indexing_queue.ensure_group()

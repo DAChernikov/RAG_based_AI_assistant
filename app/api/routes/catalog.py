@@ -25,6 +25,7 @@ from app.catalog.schemas import (
     KnowledgeSourceResponse,
     KnowledgeSourceUpdate,
     SourceRefreshRequest,
+    SourceVersionPinRequest,
     SourceVersionResponse,
 )
 from app.concurrency import api_blocking_io
@@ -72,6 +73,7 @@ def _version_response(item) -> SourceVersionResponse:
         content_checksum=item.content_checksum,
         created_at=item.created_at,
         activated_at=item.activated_at,
+        pinned=item.pinned,
     )
 
 
@@ -714,3 +716,29 @@ async def rollback_version(
     return await _activate(
         source_id, version_id, request, principal, runtime, "source_version.rollback"
     )
+
+
+@router.put(
+    "/knowledge-sources/{source_id}/versions/{version_id}/pin",
+    response_model=SourceVersionResponse,
+)
+async def pin_source_version(
+    source_id: uuid.UUID,
+    version_id: uuid.UUID,
+    payload: SourceVersionPinRequest,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    try:
+        version = await runtime["catalog_service"].call(
+            runtime["catalog_repository"].set_version_pinned,
+            principal.tenant_id,
+            source_id,
+            version_id,
+            payload.pinned,
+        )
+    except CatalogNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await _audit(request, runtime, principal, "source_version.pin", "source_version", version_id)
+    return _version_response(version)

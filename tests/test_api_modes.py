@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import get_principal, get_runtime_state
 from app.api.routes import ask, jobs
 from app.auth.security import Principal
-from app.inference.contracts import InferenceJobContract
+from app.inference.contracts import CompletedEvent, CompletedPayload, InferenceJobContract
 
 
 def build_client(runtime):
@@ -105,3 +106,98 @@ def test_async_job_endpoint_returns_202_and_urls():
     assert response.status_code == 202
     assert response.json()["job_id"] == str(application.job_id)
     assert response.json()["status_url"].endswith(str(application.job_id))
+
+
+class FakeRepository:
+    def __init__(self, job):
+        self.job = job
+        self.cancelled = True
+
+    async def get_job_for_owner(self, *_args):
+        return self.job
+
+    async def list_conversations(self, *_args):
+        return [{"conversation_id": str(self.job.conversation_id), "title": "Question"}]
+
+    async def conversation_history(self, *_args):
+        return {"conversation_id": str(self.job.conversation_id), "messages": []}
+
+    async def request_cancel(self, *_args):
+        return self.cancelled
+
+    async def create_feedback(self, _tenant, _user, answer_id, rating, _comment):
+        return SimpleNamespace(id=uuid.uuid4(), answer_id=answer_id, rating=rating)
+
+
+class FakeEventQueue:
+    async def iter_events(self, job_id, last_event_id="0-0"):
+        yield (
+            "1-0",
+            CompletedEvent(
+                event_id=str(uuid.uuid4()),
+                sequence=1,
+                job_id=job_id,
+                correlation_id=uuid.uuid4(),
+                event_type="completed",
+                payload=CompletedPayload(answer="done", mode="rag_docs"),
+            ),
+        )
+
+
+def detailed_runtime(status="completed"):
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        status=status,
+        contract_version="1.0",
+        attempt_count=1,
+        max_attempts=3,
+        cancel_requested=False,
+        queued_at=datetime.now(UTC),
+        started_at=None,
+        completed_at=None,
+        failed_at=None,
+        error_code=None,
+        error_message=None,
+        answer=None,
+        request_payload={"question": "again", "knowledge_base_id": str(uuid.uuid4())},
+    )
+    return {
+        "execution_mode": "queued",
+        "repository": FakeRepository(job),
+        "queue": FakeEventQueue(),
+        "queued_application": FakeQueuedApplication(),
+        "hybrid_retriever": FakeHybridRetriever(),
+    }, job
+
+
+def test_job_status_history_events_cancel_feedback_and_negative_cases():
+    runtime, job = detailed_runtime("running")
+    client = build_client(runtime)
+    assert client.get(f"/v1/inference-jobs/{job.id}").json()["status"] == "running"
+    stream = client.get(f"/v1/inference-jobs/{job.id}/events")
+    assert stream.status_code == 200 and "event: completed" in stream.text
+    assert client.get("/v1/conversations").json()[0]["title"] == "Question"
+    assert client.get(f"/v1/conversations/{job.conversation_id}").status_code == 200
+    assert client.post(f"/v1/inference-jobs/{job.id}/cancel").json()["cancel_requested"]
+    feedback = client.post(
+        f"/v1/answers/{uuid.uuid4()}/feedback", json={"rating": 1, "comment": "good"}
+    )
+    assert feedback.status_code == 201
+    assert (
+        client.post(f"/v1/answers/{uuid.uuid4()}/feedback", json={"rating": 0}).status_code == 422
+    )
+
+    job.status = "completed"
+    assert client.post(f"/v1/inference-jobs/{job.id}/retry").status_code == 409
+    runtime["repository"].job = None
+    assert client.get(f"/v1/inference-jobs/{job.id}").status_code == 404
+    assert client.get(f"/v1/inference-jobs/{job.id}/events").status_code == 404
+
+
+def test_failed_job_can_be_retried_with_new_contract():
+    runtime, job = detailed_runtime("failed")
+    client = build_client(runtime)
+    response = client.post(f"/v1/inference-jobs/{job.id}/retry")
+    assert response.status_code == 202
+    assert response.json()["reused"] is False

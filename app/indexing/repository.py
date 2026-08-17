@@ -20,6 +20,7 @@ from app.state.models import (
     KnowledgeIndexEntry,
     KnowledgeIndexVersion,
     KnowledgeSource,
+    ModelDefinition,
     NormalizedDocument,
     SourceVersion,
     SourceVersionStatus,
@@ -60,15 +61,35 @@ class IndexRepository:
             )
             if kb is None:
                 raise LookupError("Knowledge base was not found.")
+            model_definition = session.scalar(
+                select(ModelDefinition).where(
+                    ModelDefinition.tenant_id == tenant_id,
+                    ModelDefinition.role == "embedding",
+                    ModelDefinition.is_active.is_(True),
+                )
+            ) or session.scalar(
+                select(ModelDefinition).where(
+                    ModelDefinition.tenant_id.is_(None),
+                    ModelDefinition.role == "embedding",
+                    ModelDefinition.is_active.is_(True),
+                )
+            )
+            if model_definition is None:
+                raise LookupError("An active embedding model is required before indexing.")
             model = session.scalar(
                 select(EmbeddingModelVersion).where(
-                    EmbeddingModelVersion.model_id == "BAAI/bge-m3",
-                    EmbeddingModelVersion.version == "bge-m3/1",
+                    EmbeddingModelVersion.model_id == model_definition.model_id,
+                    EmbeddingModelVersion.version == model_definition.version,
                     EmbeddingModelVersion.is_enabled.is_(True),
                 )
             )
             if model is None:
-                raise LookupError("Embedding model version is not enabled.")
+                raise LookupError("Active registry model has no enabled embedding contract.")
+            configured_dimensions = model_definition.capabilities.get("dimensions")
+            if configured_dimensions is not None and int(configured_dimensions) != model.dimensions:
+                raise IndexingConflictError(
+                    "Embedding registry dimensions do not match the model contract."
+                )
             number = (
                 session.scalar(
                     select(func.max(KnowledgeIndexVersion.version_number)).where(
@@ -91,6 +112,7 @@ class IndexRepository:
                 tenant_id=tenant_id,
                 knowledge_base_id=knowledge_base_id,
                 index_version_id=version.id,
+                model_definition_id=model_definition.id,
                 status=IndexingRunStatus.QUEUED.value,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
@@ -250,7 +272,12 @@ class IndexRepository:
             if run is None or run.cancel_requested:
                 raise RuntimeError("Indexing lease was lost or cancellation was requested.")
             version = session.get(KnowledgeIndexVersion, run.index_version_id)
+            model = session.get(EmbeddingModelVersion, version.embedding_model_version_id)
             for row, vector in zip(rows, vectors, strict=True):
+                if len(vector) != model.dimensions:
+                    raise RuntimeError(
+                        "Embedding dimension does not match the index model contract."
+                    )
                 chunk, _blob, document, source, source_version = row
                 embedding = session.scalar(
                     select(ChunkEmbedding).where(
@@ -328,15 +355,109 @@ class IndexRepository:
                 .select_from(KnowledgeIndexEntry)
                 .where(KnowledgeIndexEntry.index_version_id == version.id)
             )
+            expected = session.scalar(
+                select(func.count(DocumentChunk.id))
+                .join(NormalizedDocument, NormalizedDocument.id == DocumentChunk.document_id)
+                .join(SourceVersion, SourceVersion.id == NormalizedDocument.source_version_id)
+                .join(KnowledgeBaseSource, KnowledgeBaseSource.source_id == SourceVersion.source_id)
+                .where(
+                    DocumentChunk.tenant_id == run.tenant_id,
+                    KnowledgeBaseSource.tenant_id == run.tenant_id,
+                    KnowledgeBaseSource.knowledge_base_id == run.knowledge_base_id,
+                    SourceVersion.status == SourceVersionStatus.ACTIVE.value,
+                )
+            )
+            valid_links = session.scalar(
+                select(func.count(KnowledgeIndexEntry.id))
+                .join(DocumentChunk, DocumentChunk.id == KnowledgeIndexEntry.chunk_id)
+                .join(NormalizedDocument, NormalizedDocument.id == KnowledgeIndexEntry.document_id)
+                .join(ChunkEmbedding, ChunkEmbedding.id == KnowledgeIndexEntry.chunk_embedding_id)
+                .where(
+                    KnowledgeIndexEntry.index_version_id == version.id,
+                    KnowledgeIndexEntry.tenant_id == run.tenant_id,
+                    DocumentChunk.tenant_id == run.tenant_id,
+                    NormalizedDocument.tenant_id == run.tenant_id,
+                    ChunkEmbedding.tenant_id == run.tenant_id,
+                    ChunkEmbedding.embedding_model_version_id == version.embedding_model_version_id,
+                )
+            )
+            retrieval_smoke = False
+            sample_embedding = session.scalar(
+                select(ChunkEmbedding)
+                .join(
+                    KnowledgeIndexEntry,
+                    KnowledgeIndexEntry.chunk_embedding_id == ChunkEmbedding.id,
+                )
+                .where(KnowledgeIndexEntry.index_version_id == version.id)
+                .limit(1)
+            )
+            if sample_embedding is not None:
+                if session.bind is not None and session.bind.dialect.name == "postgresql":
+                    retrieval_smoke = (
+                        session.scalar(
+                            select(KnowledgeIndexEntry.id)
+                            .join(
+                                ChunkEmbedding,
+                                ChunkEmbedding.id == KnowledgeIndexEntry.chunk_embedding_id,
+                            )
+                            .where(KnowledgeIndexEntry.index_version_id == version.id)
+                            .order_by(
+                                ChunkEmbedding.embedding.cosine_distance(sample_embedding.embedding)
+                            )
+                            .limit(1)
+                        )
+                        is not None
+                    )
+                else:
+                    # SQLite is used only by unit tests; relational integrity remains exercised.
+                    retrieval_smoke = True
             version.status = IndexVersionStatus.VALIDATING.value
-            version.manifest = {"entry_count": count, "contract_version": "1.0"}
-            version.status = IndexVersionStatus.READY.value
-            run.status = IndexingRunStatus.COMPLETED.value
+            version.manifest = {
+                "entry_count": count,
+                "expected_chunk_count": expected,
+                "validated_link_count": valid_links,
+                "embedding_dimensions": session.get(
+                    EmbeddingModelVersion, version.embedding_model_version_id
+                ).dimensions,
+                "retrieval_smoke": retrieval_smoke,
+                "contract_version": "1.1",
+            }
+            validation_error = None
+            if not count:
+                validation_error = "empty_index"
+            elif count != expected or count != valid_links or not retrieval_smoke:
+                validation_error = "integrity_mismatch"
+            if validation_error:
+                version.status = IndexVersionStatus.FAILED.value
+                version.failure_code = validation_error
+                version.failure_message = "Index validation failed. See indexing events."
+                run.status = IndexingRunStatus.FAILED.value
+                run.error_code = validation_error
+                run.error_message = version.failure_message
+                session.add(
+                    IndexingEvent(
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        event_type="validation_failed",
+                        payload={"reason": validation_error},
+                    )
+                )
+            else:
+                version.status = IndexVersionStatus.READY.value
+                run.status = IndexingRunStatus.COMPLETED.value
+                session.add(
+                    IndexingEvent(
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        event_type="validated",
+                        payload={"entry_count": count},
+                    )
+                )
             run.completed_at = datetime.now(UTC)
             run.lease_owner = None
             run.lease_token = None
             run.lease_expires_at = None
-            return True
+            return validation_error is None
 
     def fail(self, run_id: uuid.UUID, token: uuid.UUID, code: str) -> bool:
         with self.session_factory.begin() as session:
@@ -457,6 +578,8 @@ class IndexRepository:
             )
             if target is None:
                 raise LookupError("Index version was not found.")
+            if target.status == IndexVersionStatus.ACTIVE.value:
+                return target
             if target.status not in {
                 IndexVersionStatus.READY.value,
                 IndexVersionStatus.SUPERSEDED.value,
@@ -475,6 +598,8 @@ class IndexRepository:
             if current and current.id != target.id:
                 current.status = IndexVersionStatus.SUPERSEDED.value
                 current.superseded_at = now
+                # Release the partial unique active-index slot before promoting the target.
+                session.flush()
             target.status = IndexVersionStatus.ACTIVE.value
             target.activated_at = now
             target.superseded_at = None

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 from sqlalchemy import select
 
 from app.catalog.configs import JDBCSourceConfig, parse_source_config
 from app.catalog.jdbc_urls import parse_jdbc_url
+from app.concurrency import api_blocking_io
 from app.connectors.base import EnvironmentCredentialResolver, validate_credential_material
 from app.connectors.jdbc import resolve_public_database_host
 from app.state.models import KnowledgeSource
@@ -37,7 +37,7 @@ class SQLExplainContext:
                     )
                 )
 
-        source = await asyncio.to_thread(load)
+        source = await api_blocking_io.call(load)
         if source is None:
             raise RuntimeError("JDBC schema source is unavailable.")
         config = parse_source_config(source.config)

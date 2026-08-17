@@ -24,6 +24,9 @@ class APIClient:
     def headers(self) -> dict[str, str]:
         return {"X-API-Key": bot_settings.api_key} if bot_settings.api_key else {}
 
+    def _client(self, timeout: float | httpx.Timeout) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
     async def ask(
         self,
         question: str,
@@ -36,7 +39,7 @@ class APIClient:
         if top_k is not None:
             payload["top_k"] = top_k
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._client(self.timeout) as client:
             response = await client.post(f"{self.base_url}/ask", json=payload, headers=self.headers)
             response.raise_for_status()
             return response.json()
@@ -53,7 +56,7 @@ class APIClient:
         if top_k is not None:
             payload["top_k"] = top_k
 
-        async with httpx.AsyncClient(timeout=self.stream_timeout) as client:
+        async with self._client(self.stream_timeout) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url}/ask/stream",
@@ -76,7 +79,7 @@ class APIClient:
                         continue
 
     async def ready(self) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._client(self.timeout) as client:
             response = await client.get(f"{self.base_url}/ready")
             response.raise_for_status()
             return response.json()

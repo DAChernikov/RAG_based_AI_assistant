@@ -4,9 +4,11 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.observability import log_event
 
 
 class EmbeddingSettings(BaseSettings):
@@ -19,6 +21,7 @@ class EmbeddingSettings(BaseSettings):
     embedding_concurrency: int = 2
     embedding_max_queue: int = 64
     embedding_request_timeout_sec: float = 120.0
+    embedding_warmup: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
@@ -34,19 +37,36 @@ class LocalBGEBackend:
         self.settings = settings
         self._model: Any = None
         self._load_lock = asyncio.Lock()
+        self._load_error: str | None = None
 
     async def _load(self):
         if self._model is None:
             async with self._load_lock:
                 if self._model is None:
-                    from sentence_transformers import SentenceTransformer
+                    try:
+                        from sentence_transformers import SentenceTransformer
 
-                    self._model = await asyncio.to_thread(
-                        SentenceTransformer,
-                        self.settings.embedding_model,
-                        device=self.settings.embedding_device,
-                    )
+                        self._model = await asyncio.to_thread(
+                            SentenceTransformer,
+                            self.settings.embedding_model,
+                            device=self.settings.embedding_device,
+                        )
+                        self._load_error = None
+                    except Exception:
+                        self._load_error = "model_load_failed"
+                        raise
         return self._model
+
+    @property
+    def ready(self) -> bool:
+        return self._model is not None and self._load_error is None
+
+    @property
+    def readiness_error(self) -> str | None:
+        return self._load_error
+
+    async def warmup(self) -> None:
+        await self._load()
 
     async def encode(self, texts: list[str]) -> list[list[float]]:
         model = await self._load()
@@ -96,6 +116,16 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if config.embedding_warmup and hasattr(runtime_backend, "warmup"):
+            try:
+                await runtime_backend.warmup()
+            except Exception:
+                log_event(
+                    "embedding_warmup_failed",
+                    service="embedding",
+                    status="not_ready",
+                    error_code="model_load_failed",
+                )
         yield
         await runtime_backend.close()
 
@@ -106,13 +136,17 @@ def create_app(
         return {"status": "ok"}
 
     @application.get("/ready")
-    async def ready():
+    async def ready(response: Response):
+        model_ready = bool(getattr(runtime_backend, "ready", backend is not None))
+        if not model_ready:
+            response.status_code = 503
         return {
-            "status": "ready",
-            "model_ready": getattr(runtime_backend, "_model", None) is not None,
+            "status": "ready" if model_ready else "not_ready",
+            "model_ready": model_ready,
             "model": config.embedding_model,
             "model_version": config.embedding_model_version,
-            "lazy_loaded": getattr(runtime_backend, "_model", None) is None,
+            "lazy_loaded": not model_ready,
+            "reason": getattr(runtime_backend, "readiness_error", None),
         }
 
     @application.post("/v1/embeddings", response_model=EmbeddingResponse)

@@ -103,7 +103,11 @@ filterwarnings = [
 [tool.black]
 line-length = 100
 target-version = ["py311"]
-extend-exclude = "web/(node_modules|dist|playwright-report|test-results)"
+# Released migrations remain byte-for-byte immutable; style applies to every new migration.
+extend-exclude = '''(?x)(
+  web/(node_modules|dist|playwright-report|test-results)
+  | migrations/versions/(20260731_02_authentication_rbac|20260817_07_hybrid_index)\.py
+)'''
 
 [tool.isort]
 profile = "black"

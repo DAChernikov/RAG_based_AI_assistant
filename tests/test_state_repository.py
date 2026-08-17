@@ -43,7 +43,6 @@ def test_repository_persists_job_answer_sources_and_conversation(repository):
         contract_version="1.0",
         max_attempts=3,
     )
-    repo.mark_running(created.job.id)
     repo.complete_job(
         created.job.id,
         result={

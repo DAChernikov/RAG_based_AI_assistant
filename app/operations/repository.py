@@ -5,17 +5,31 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, exists, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.state.models import (
     AuditEvent,
+    ChunkEmbedding,
+    ContentBlob,
+    DocumentChunk,
+    IndexingEvent,
+    IndexingRun,
+    IndexingRunStatus,
     IndexVersionStatus,
+    InferenceJob,
+    IngestionRun,
+    IngestionRunStatus,
+    JobStatus,
+    KnowledgeIndexEntry,
     KnowledgeIndexVersion,
     KnowledgeSource,
     ModelDefinition,
+    NormalizedDocument,
     PromptTemplate,
     RetentionPolicy,
+    ScheduleAttempt,
+    ScheduleAttemptStatus,
     SourceSchedule,
     SourceVersion,
     SourceVersionStatus,
@@ -95,30 +109,164 @@ class OperationsRepository:
             session.delete(row)
             return True
 
-    def claim_due_schedules(self, limit: int = 20):
+    def claim_due_schedules(
+        self, limit: int = 20, *, lease_seconds: int = 30, max_attempts: int = 3
+    ):
         with self.session_factory.begin() as session:
             now = datetime.now(UTC)
-            rows = list(
+            attempts = list(
                 session.scalars(
-                    select(SourceSchedule)
-                    .where(SourceSchedule.is_enabled.is_(True), SourceSchedule.next_run_at <= now)
-                    .order_by(SourceSchedule.next_run_at)
+                    select(ScheduleAttempt)
+                    .where(
+                        ScheduleAttempt.status == ScheduleAttemptStatus.PENDING.value,
+                        ScheduleAttempt.next_attempt_at <= now,
+                        or_(
+                            ScheduleAttempt.lease_expires_at.is_(None),
+                            ScheduleAttempt.lease_expires_at < now,
+                        ),
+                    )
+                    .order_by(ScheduleAttempt.next_attempt_at)
                     .limit(limit)
                     .with_for_update(skip_locked=True)
                 )
             )
-            claimed = []
+            remaining = max(0, limit - len(attempts))
+            rows = (
+                list(
+                    session.scalars(
+                        select(SourceSchedule)
+                        .where(
+                            SourceSchedule.is_enabled.is_(True), SourceSchedule.next_run_at <= now
+                        )
+                        .order_by(SourceSchedule.next_run_at)
+                        .limit(remaining)
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                if remaining
+                else []
+            )
             for row in rows:
                 scheduled_for = (
                     row.next_run_at.replace(tzinfo=UTC)
                     if row.next_run_at.tzinfo is None
                     else row.next_run_at
                 )
-                row.last_run_at = now
-                # Bounded catch-up: one trigger per scheduler pass.
-                row.next_run_at = max(scheduled_for, now) + timedelta(seconds=row.interval_seconds)
-                claimed.append((row.id, row.tenant_id, row.source_id, scheduled_for))
+                existing = session.scalar(
+                    select(ScheduleAttempt).where(
+                        ScheduleAttempt.schedule_id == row.id,
+                        ScheduleAttempt.scheduled_for == scheduled_for,
+                    )
+                )
+                if existing is None:
+                    existing = ScheduleAttempt(
+                        tenant_id=row.tenant_id,
+                        schedule_id=row.id,
+                        source_id=row.source_id,
+                        scheduled_for=scheduled_for,
+                        next_attempt_at=now,
+                        max_attempts=max_attempts,
+                    )
+                    session.add(existing)
+                    session.flush()
+                if existing.status == ScheduleAttemptStatus.PENDING.value and all(
+                    item.id != existing.id for item in attempts
+                ):
+                    attempts.append(existing)
+            claimed = []
+            for attempt in attempts[:limit]:
+                token = uuid.uuid4()
+                attempt.attempt_count += 1
+                attempt.lease_token = token
+                attempt.lease_expires_at = now + timedelta(seconds=lease_seconds)
+                claimed.append(
+                    (
+                        attempt.id,
+                        token,
+                        attempt.schedule_id,
+                        attempt.tenant_id,
+                        attempt.source_id,
+                        attempt.scheduled_for,
+                    )
+                )
             return claimed
+
+    def complete_schedule_attempt(
+        self, attempt_id: uuid.UUID, token: uuid.UUID, ingestion_run_id: uuid.UUID
+    ) -> bool:
+        with self.session_factory.begin() as session:
+            attempt = session.scalar(
+                select(ScheduleAttempt)
+                .where(
+                    ScheduleAttempt.id == attempt_id,
+                    ScheduleAttempt.lease_token == token,
+                    ScheduleAttempt.status == ScheduleAttemptStatus.PENDING.value,
+                )
+                .with_for_update()
+            )
+            if attempt is None:
+                return False
+            schedule = session.scalar(
+                select(SourceSchedule)
+                .where(SourceSchedule.id == attempt.schedule_id)
+                .with_for_update()
+            )
+            if schedule is None:
+                return False
+            now = datetime.now(UTC)
+            scheduled_for = attempt.scheduled_for
+            if scheduled_for.tzinfo is None:
+                scheduled_for = scheduled_for.replace(tzinfo=UTC)
+            schedule.last_run_at = now
+            schedule.next_run_at = max(scheduled_for, now) + timedelta(
+                seconds=schedule.interval_seconds
+            )
+            attempt.status = ScheduleAttemptStatus.ENQUEUED.value
+            attempt.ingestion_run_id = ingestion_run_id
+            attempt.completed_at = now
+            attempt.lease_token = None
+            attempt.lease_expires_at = None
+            return True
+
+    def fail_schedule_attempt(
+        self, attempt_id: uuid.UUID, token: uuid.UUID, error_code: str
+    ) -> bool:
+        with self.session_factory.begin() as session:
+            attempt = session.scalar(
+                select(ScheduleAttempt)
+                .where(
+                    ScheduleAttempt.id == attempt_id,
+                    ScheduleAttempt.lease_token == token,
+                    ScheduleAttempt.status == ScheduleAttemptStatus.PENDING.value,
+                )
+                .with_for_update()
+            )
+            if attempt is None:
+                return False
+            now = datetime.now(UTC)
+            attempt.error_code = error_code[:100]
+            attempt.lease_token = None
+            attempt.lease_expires_at = None
+            if attempt.attempt_count >= attempt.max_attempts:
+                attempt.status = ScheduleAttemptStatus.FAILED.value
+                attempt.completed_at = now
+                schedule = session.scalar(
+                    select(SourceSchedule)
+                    .where(SourceSchedule.id == attempt.schedule_id)
+                    .with_for_update()
+                )
+                if schedule is not None:
+                    scheduled_for = attempt.scheduled_for
+                    if scheduled_for.tzinfo is None:
+                        scheduled_for = scheduled_for.replace(tzinfo=UTC)
+                    schedule.next_run_at = max(scheduled_for, now) + timedelta(
+                        seconds=schedule.interval_seconds
+                    )
+            else:
+                attempt.next_attempt_at = now + timedelta(
+                    seconds=min(300, 2**attempt.attempt_count)
+                )
+            return True
 
     def get_retention_policy(self, tenant_id: uuid.UUID):
         with self.session_factory.begin() as session:
@@ -149,6 +297,7 @@ class OperationsRepository:
                     select(SourceVersion.id)
                     .where(
                         SourceVersion.tenant_id == tenant_id,
+                        SourceVersion.pinned.is_(False),
                         SourceVersion.status.in_(
                             [SourceVersionStatus.SUPERSEDED.value, SourceVersionStatus.FAILED.value]
                         ),
@@ -173,21 +322,136 @@ class OperationsRepository:
                     .limit(limit)
                 )
             )
-        return {"source_version_ids": source_ids, "index_version_ids": index_ids}
+            run_cutoff = now - timedelta(days=policy.run_history_days)
+            ingestion_run_ids = list(
+                session.scalars(
+                    select(IngestionRun.id)
+                    .where(
+                        IngestionRun.tenant_id == tenant_id,
+                        IngestionRun.status.in_(
+                            [
+                                IngestionRunStatus.COMPLETED.value,
+                                IngestionRunStatus.FAILED.value,
+                                IngestionRunStatus.CANCELLED.value,
+                            ]
+                        ),
+                        IngestionRun.created_at < run_cutoff,
+                    )
+                    .limit(limit)
+                )
+            )
+            indexing_run_ids = list(
+                session.scalars(
+                    select(IndexingRun.id)
+                    .where(
+                        IndexingRun.tenant_id == tenant_id,
+                        IndexingRun.status.in_(
+                            [
+                                IndexingRunStatus.COMPLETED.value,
+                                IndexingRunStatus.FAILED.value,
+                                IndexingRunStatus.CANCELLED.value,
+                            ]
+                        ),
+                        IndexingRun.created_at < run_cutoff,
+                    )
+                    .limit(limit)
+                )
+            )
+            inference_job_ids = list(
+                session.scalars(
+                    select(InferenceJob.id)
+                    .where(
+                        InferenceJob.tenant_id == tenant_id,
+                        InferenceJob.status.in_(
+                            [
+                                JobStatus.COMPLETED.value,
+                                JobStatus.FAILED.value,
+                                JobStatus.CANCELLED.value,
+                            ]
+                        ),
+                        InferenceJob.created_at < run_cutoff,
+                    )
+                    .limit(limit)
+                )
+            )
+            indexing_event_ids = list(
+                session.scalars(
+                    select(IndexingEvent.id)
+                    .join(IndexingRun, IndexingRun.id == IndexingEvent.run_id)
+                    .where(
+                        IndexingEvent.tenant_id == tenant_id,
+                        IndexingEvent.created_at < run_cutoff,
+                        IndexingRun.status.in_(
+                            [
+                                IndexingRunStatus.COMPLETED.value,
+                                IndexingRunStatus.FAILED.value,
+                                IndexingRunStatus.CANCELLED.value,
+                            ]
+                        ),
+                    )
+                    .limit(limit)
+                )
+            )
+            audit_ids = list(
+                session.scalars(
+                    select(AuditEvent.id)
+                    .where(
+                        AuditEvent.tenant_id == tenant_id,
+                        AuditEvent.created_at < now - timedelta(days=policy.audit_days),
+                    )
+                    .limit(limit)
+                )
+            )
+            orphan_embedding_ids = list(
+                session.scalars(
+                    select(ChunkEmbedding.id)
+                    .where(
+                        ChunkEmbedding.tenant_id == tenant_id,
+                        ~exists().where(
+                            KnowledgeIndexEntry.chunk_embedding_id == ChunkEmbedding.id
+                        ),
+                    )
+                    .limit(limit)
+                )
+            )
+            orphan_blob_ids = list(
+                session.scalars(
+                    select(ContentBlob.id)
+                    .where(
+                        ContentBlob.tenant_id == tenant_id,
+                        ~exists().where(DocumentChunk.content_blob_id == ContentBlob.id),
+                        ~exists().where(NormalizedDocument.content_blob_id == ContentBlob.id),
+                    )
+                    .limit(limit)
+                )
+            )
+        return {
+            "source_version_ids": source_ids,
+            "index_version_ids": index_ids,
+            "ingestion_run_ids": ingestion_run_ids,
+            "indexing_run_ids": indexing_run_ids,
+            "inference_job_ids": inference_job_ids,
+            "indexing_event_ids": indexing_event_ids,
+            "audit_event_ids": audit_ids,
+            "orphan_embedding_ids": orphan_embedding_ids,
+            "orphan_content_blob_ids": orphan_blob_ids,
+        }
 
     def execute_retention(self, tenant_id: uuid.UUID, limit: int = 500):
         candidates = self.retention_candidates(tenant_id, limit)
         with self.session_factory.begin() as session:
-            if candidates["source_version_ids"]:
-                session.execute(
-                    delete(SourceVersion).where(
-                        SourceVersion.id.in_(candidates["source_version_ids"]),
-                        SourceVersion.tenant_id == tenant_id,
-                        SourceVersion.status.in_(
-                            [SourceVersionStatus.SUPERSEDED.value, SourceVersionStatus.FAILED.value]
-                        ),
+            for key, model in (
+                ("indexing_event_ids", IndexingEvent),
+                ("indexing_run_ids", IndexingRun),
+                ("ingestion_run_ids", IngestionRun),
+                ("inference_job_ids", InferenceJob),
+            ):
+                if candidates[key]:
+                    session.execute(
+                        delete(model).where(
+                            model.id.in_(candidates[key]), model.tenant_id == tenant_id
+                        )
                     )
-                )
             if candidates["index_version_ids"]:
                 session.execute(
                     delete(KnowledgeIndexVersion).where(
@@ -199,6 +463,39 @@ class OperationsRepository:
                         ),
                     )
                 )
+            if candidates["source_version_ids"]:
+                session.execute(
+                    delete(SourceVersion).where(
+                        SourceVersion.id.in_(candidates["source_version_ids"]),
+                        SourceVersion.tenant_id == tenant_id,
+                        SourceVersion.pinned.is_(False),
+                        SourceVersion.status.in_(
+                            [SourceVersionStatus.SUPERSEDED.value, SourceVersionStatus.FAILED.value]
+                        ),
+                    )
+                )
+            if candidates["audit_event_ids"]:
+                session.execute(
+                    delete(AuditEvent).where(
+                        AuditEvent.id.in_(candidates["audit_event_ids"]),
+                        AuditEvent.tenant_id == tenant_id,
+                    )
+                )
+        # Version removal can create new derived orphans; discover them after FK cascades.
+        post = self.retention_candidates(tenant_id, limit)
+        with self.session_factory.begin() as session:
+            for orphan_key, orphan_model in (
+                ("orphan_embedding_ids", ChunkEmbedding),
+                ("orphan_content_blob_ids", ContentBlob),
+            ):
+                ids = post[orphan_key]
+                if ids:
+                    session.execute(
+                        delete(orphan_model).where(
+                            orphan_model.id.in_(ids), orphan_model.tenant_id == tenant_id
+                        )
+                    )
+                    candidates[orphan_key] = list(dict.fromkeys([*candidates[orphan_key], *ids]))
         return candidates
 
     def list_models(self, tenant_id: uuid.UUID, offset: int = 0, limit: int = 100):
@@ -231,23 +528,69 @@ class OperationsRepository:
 
     def activate_model(self, tenant_id: uuid.UUID, model_id: uuid.UUID):
         with self.session_factory.begin() as session:
-            row = session.scalar(
-                select(ModelDefinition)
-                .where(ModelDefinition.id == model_id, ModelDefinition.tenant_id == tenant_id)
-                .with_for_update()
+            target = session.scalar(
+                select(ModelDefinition).where(
+                    ModelDefinition.id == model_id, ModelDefinition.tenant_id == tenant_id
+                )
             )
-            if row is None:
+            if target is None:
                 raise LookupError("Model definition was not found.")
-            for current in session.scalars(
+            rows = list(
+                session.scalars(
+                    select(ModelDefinition)
+                    .where(
+                        ModelDefinition.tenant_id == tenant_id,
+                        ModelDefinition.role == target.role,
+                    )
+                    .with_for_update()
+                )
+            )
+            row = next(item for item in rows if item.id == model_id)
+            for current in rows:
+                current.is_active = current.id == row.id
+            return row
+
+    def resolve_active_model(self, tenant_id: uuid.UUID, role: str):
+        with self.session_factory() as session:
+            tenant = session.scalar(
                 select(ModelDefinition).where(
                     ModelDefinition.tenant_id == tenant_id,
-                    ModelDefinition.role == row.role,
+                    ModelDefinition.role == role,
                     ModelDefinition.is_active.is_(True),
                 )
-            ):
-                current.is_active = False
-            row.is_active = True
-            return row
+            )
+            if tenant is not None:
+                return tenant
+            return session.scalar(
+                select(ModelDefinition).where(
+                    ModelDefinition.tenant_id.is_(None),
+                    ModelDefinition.role == role,
+                    ModelDefinition.is_active.is_(True),
+                )
+            )
+
+    def get_model(self, model_id: uuid.UUID):
+        with self.session_factory() as session:
+            return session.get(ModelDefinition, model_id)
+
+    def resolve_active_index_model(self, tenant_id: uuid.UUID, knowledge_base_id: uuid.UUID):
+        with self.session_factory() as session:
+            return session.scalar(
+                select(ModelDefinition)
+                .join(IndexingRun, IndexingRun.model_definition_id == ModelDefinition.id)
+                .join(
+                    KnowledgeIndexVersion,
+                    KnowledgeIndexVersion.id == IndexingRun.index_version_id,
+                )
+                .where(
+                    KnowledgeIndexVersion.tenant_id == tenant_id,
+                    KnowledgeIndexVersion.knowledge_base_id == knowledge_base_id,
+                    KnowledgeIndexVersion.status == IndexVersionStatus.ACTIVE.value,
+                    IndexingRun.status == "completed",
+                )
+                .order_by(IndexingRun.completed_at.desc())
+                .limit(1)
+            )
 
     def list_prompts(self, tenant_id: uuid.UUID, offset: int = 0, limit: int = 100):
         with self.session_factory() as session:
@@ -277,23 +620,46 @@ class OperationsRepository:
 
     def activate_prompt(self, tenant_id: uuid.UUID, prompt_id: uuid.UUID):
         with self.session_factory.begin() as session:
-            row = session.scalar(
-                select(PromptTemplate)
-                .where(PromptTemplate.id == prompt_id, PromptTemplate.tenant_id == tenant_id)
-                .with_for_update()
+            target = session.scalar(
+                select(PromptTemplate).where(
+                    PromptTemplate.id == prompt_id, PromptTemplate.tenant_id == tenant_id
+                )
             )
-            if row is None:
+            if target is None:
                 raise LookupError("Prompt template was not found.")
-            for current in session.scalars(
+            rows = list(
+                session.scalars(
+                    select(PromptTemplate)
+                    .where(
+                        PromptTemplate.tenant_id == tenant_id,
+                        PromptTemplate.name == target.name,
+                    )
+                    .with_for_update()
+                )
+            )
+            row = next(item for item in rows if item.id == prompt_id)
+            for current in rows:
+                current.is_active = current.id == row.id
+            return row
+
+    def resolve_active_prompt(self, tenant_id: uuid.UUID, name: str):
+        with self.session_factory() as session:
+            tenant = session.scalar(
                 select(PromptTemplate).where(
                     PromptTemplate.tenant_id == tenant_id,
-                    PromptTemplate.name == row.name,
+                    PromptTemplate.name == name,
                     PromptTemplate.is_active.is_(True),
                 )
-            ):
-                current.is_active = False
-            row.is_active = True
-            return row
+            )
+            if tenant is not None:
+                return tenant
+            return session.scalar(
+                select(PromptTemplate).where(
+                    PromptTemplate.tenant_id.is_(None),
+                    PromptTemplate.name == name,
+                    PromptTemplate.is_active.is_(True),
+                )
+            )
 
     def list_audit(self, tenant_id: uuid.UUID, offset: int, limit: int):
         with self.session_factory() as session:

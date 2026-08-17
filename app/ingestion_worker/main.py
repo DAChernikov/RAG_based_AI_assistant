@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.api.config import settings
 from app.catalog.repository import CatalogRepository, LeaseLostError
+from app.concurrency import BoundedThreadAdapter
 from app.connectors.base import EnvironmentCredentialResolver, TransientConnectorError
 from app.connectors.git import GitConnector
 from app.connectors.jdbc import JDBCMetadataConnector
@@ -18,11 +19,18 @@ from app.ingestion.pipeline import IngestionCancelled, IngestionPipeline
 from app.ingestion.redis_queue import RedisIngestionQueue
 from app.state.database import create_database_engine, create_session_factory
 from app.state.models import IngestionRunStatus
+from app.worker_healthcheck import record_local_heartbeat
 
 
 class IngestionWorker:
     def __init__(
-        self, repository, queue, pipeline, worker_id: str | None = None, auto_indexer=None
+        self,
+        repository,
+        queue,
+        pipeline,
+        worker_id: str | None = None,
+        auto_indexer=None,
+        blocking_io=None,
     ):
         self.repository = repository
         self.queue = queue
@@ -30,6 +38,8 @@ class IngestionWorker:
         self.worker_id = worker_id or settings.ingestion_worker_id
         self.stop_event = asyncio.Event()
         self.auto_indexer = auto_indexer
+        self.blocking_io = blocking_io or BoundedThreadAdapter(max_workers=4, max_pending=8)
+        self._owns_blocking_io = blocking_io is None
 
     async def _event(self, contract, event_type: str, stage: str | None = None) -> None:
         await self.queue.publish_event(
@@ -45,7 +55,7 @@ class IngestionWorker:
             )
             await self.queue.ack(message_id)
             return
-        run = await asyncio.to_thread(
+        run = await self.blocking_io.call(
             self.repository.get_ingestion_run, contract.tenant_id, contract.run_id
         )
         if run is None:
@@ -61,14 +71,14 @@ class IngestionWorker:
         }:
             await self.queue.ack(message_id)
             return
-        claimed = await asyncio.to_thread(
+        claimed = await self.blocking_io.call(
             self.repository.claim_ingestion_run,
             contract.run_id,
             self.worker_id,
             settings.ingestion_lease_sec,
         )
         if claimed is None:
-            exhausted = await asyncio.to_thread(
+            exhausted = await self.blocking_io.call(
                 self.repository.fail_exhausted_ingestion,
                 contract.tenant_id,
                 contract.source_id,
@@ -94,7 +104,7 @@ class IngestionWorker:
 
         try:
             await self.pipeline.execute(contract, emit, lease_token=lease_token)
-            completed = await asyncio.to_thread(
+            completed = await self.blocking_io.call(
                 self.repository.complete_ingestion_job, contract.run_id, lease_token
             )
             if completed:
@@ -103,14 +113,14 @@ class IngestionWorker:
                     await self.auto_indexer(contract)
                 await self.queue.ack(message_id)
         except IngestionCancelled:
-            cancelled = await asyncio.to_thread(
+            cancelled = await self.blocking_io.call(
                 self.repository.cancel_ingestion_job, contract.run_id, lease_token
             )
             if cancelled:
                 await self._event(contract, "cancelled", "cancelled")
                 await self.queue.ack(message_id)
         except TransientConnectorError:
-            retried = await asyncio.to_thread(
+            retried = await self.blocking_io.call(
                 self.repository.retry_ingestion_job,
                 contract.run_id,
                 lease_token,
@@ -133,7 +143,7 @@ class IngestionWorker:
 
     async def _fail(self, message_id, contract, lease_token, code: str) -> None:
         message = "Ingestion failed. See logs using the correlation ID."
-        failed = await asyncio.to_thread(
+        failed = await self.blocking_io.call(
             self.repository.fail_ingestion,
             contract.tenant_id,
             contract.source_id,
@@ -153,7 +163,7 @@ class IngestionWorker:
         interval = max(1, settings.ingestion_lease_sec // 3)
         while True:
             await asyncio.sleep(interval)
-            renewed = await asyncio.to_thread(
+            renewed = await self.blocking_io.call(
                 self.repository.renew_ingestion_lease,
                 run_id,
                 lease_token,
@@ -164,6 +174,7 @@ class IngestionWorker:
 
     async def _heartbeat_loop(self) -> None:
         while not self.stop_event.is_set():
+            record_local_heartbeat("ingestion")
             with contextlib.suppress(Exception):
                 await self.queue.heartbeat(self.worker_id)
             try:
@@ -187,6 +198,8 @@ class IngestionWorker:
         finally:
             self.stop_event.set()
             await heartbeat
+            if self._owns_blocking_io:
+                self.blocking_io.close()
 
 
 async def async_main() -> None:
@@ -210,7 +223,7 @@ async def async_main() -> None:
     await indexing_queue.ensure_group()
 
     async def auto_index(contract):
-        knowledge_bases = await asyncio.to_thread(
+        knowledge_bases = await worker.blocking_io.call(
             repository.knowledge_base_ids_for_source,
             contract.tenant_id,
             contract.source_id,
@@ -218,7 +231,7 @@ async def async_main() -> None:
         for knowledge_base_id in knowledge_bases:
             key = f"source-version:{contract.source_version_id}:kb:{knowledge_base_id}"
             request_hash = __import__("hashlib").sha256(key.encode()).hexdigest()
-            run, created = await asyncio.to_thread(
+            run, created = await worker.blocking_io.call(
                 index_repository.create_run,
                 contract.tenant_id,
                 knowledge_base_id,

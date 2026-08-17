@@ -19,13 +19,14 @@ def test_health():
 
 def test_ready():
     response = client.get("/ready")
-    assert response.status_code == 200
+    assert response.status_code == 503
 
     payload = response.json()
     assert "status" in payload
     assert payload["execution_mode"] == "queued"
     assert "components" in payload
     assert "database" in payload["components"]
+    assert set(payload["components"].values()) <= {"ready", "not_ready"}
 
 
 class FakeQueue:
@@ -55,7 +56,6 @@ def test_queued_ready_uses_worker_heartbeat(monkeypatch):
     queued_app.include_router(health.router)
     queued_app.dependency_overrides[get_runtime_state] = lambda: {}
     queued_app.state.runtime = {
-        "execution_mode": "queued",
         "database_engine": object(),
         "queue": FakeQueue(),
         "embedding_client": FakeEmbedding(),

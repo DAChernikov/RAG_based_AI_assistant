@@ -207,12 +207,15 @@ async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         data = await api_client.ready()
+        components = data.get("components", {})
         text = (
             "Статус API:\n"
             f"- status: {data.get('status')}\n"
-            f"- artifacts_ready: {data.get('artifacts_ready')}\n"
-            f"- rag_ready: {data.get('rag_ready')}\n"
-            f"- startup_error: {data.get('startup_error')}"
+            f"- database: {components.get('database')}\n"
+            f"- queue: {components.get('redis')}\n"
+            f"- inference worker: {components.get('inference_worker')}\n"
+            f"- generation model: {components.get('generation_model')}\n"
+            f"- embedding model: {components.get('embedding_model')}"
         )
         await update.message.reply_text(text)
     except httpx.HTTPStatusError as exc:

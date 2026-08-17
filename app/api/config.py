@@ -1,4 +1,7 @@
+import ipaddress
+import tempfile
 from typing import Literal
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -57,8 +60,8 @@ class Settings(BaseSettings):
     model_max_context_chars: int = 12000
     model_readiness_timeout: float = 2.0
     model_readiness_path: str = "/models"
+    model_http_allowed_hosts: str = ""
 
-    inference_execution_mode: str = "queued"
     database_url: str = "postgresql+psycopg://rag:rag@127.0.0.1:5432/rag"
     redis_url: str = "redis://127.0.0.1:6379/0"
     inference_jobs_stream: str = "rag:inference:jobs"
@@ -70,6 +73,7 @@ class Settings(BaseSettings):
     inference_event_ttl_sec: int = 86400
     worker_heartbeat_ttl_sec: int = 20
     worker_stale_after_sec: int = 30
+    worker_health_dir: str = tempfile.gettempdir()
     worker_id: str = "worker-1"
     worker_block_ms: int = 2000
     worker_claim_idle_ms: int = 60000
@@ -93,6 +97,7 @@ class Settings(BaseSettings):
     embedding_api_token: str | None = None
     embedding_model: str = "BAAI/bge-m3"
     embedding_model_version: str = "bge-m3/1"
+    embedding_dimensions: int = 1024
     embedding_request_timeout: float = 60.0
     embedding_batch_size: int = 32
     reranker_api_base_url: str | None = None
@@ -143,19 +148,91 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def fail_closed_in_production(self):
         if self.app_env == "production":
+            placeholder_markers = ("replace", "change-me", ".invalid", "example.com")
+
+            def validate_endpoint(
+                name: str, value: str, *, schemes: set[str], allow_internal_http: bool = False
+            ) -> None:
+                lowered = value.lower()
+                if any(marker in lowered for marker in placeholder_markers):
+                    raise ValueError(f"{name} contains a placeholder.")
+                parsed = urlsplit(value)
+                http_allowlist = {
+                    item.strip().casefold()
+                    for item in self.model_http_allowed_hosts.split(",")
+                    if item.strip()
+                }
+                http_allowed = (
+                    allow_internal_http
+                    and parsed.scheme == "http"
+                    and parsed.hostname
+                    and parsed.hostname.casefold() in http_allowlist
+                )
+                if (parsed.scheme not in schemes and not http_allowed) or not parsed.hostname:
+                    raise ValueError(f"{name} has an invalid scheme or host.")
+                hostname = parsed.hostname.lower()
+                if hostname == "localhost":
+                    raise ValueError(f"{name} must not use localhost in production.")
+                try:
+                    if ipaddress.ip_address(hostname).is_loopback:
+                        raise ValueError(f"{name} must not use a loopback address in production.")
+                except ValueError as exc:
+                    if "loopback" in str(exc):
+                        raise
+
             if self.auth_disabled:
                 raise ValueError("AUTH_DISABLED is forbidden in production.")
             if not self.auth_cookie_secure:
                 raise ValueError("AUTH_COOKIE_SECURE must be true in production.")
-            if len(self.jwt_secret or "") < 48 or "replace" in (self.jwt_secret or "").lower():
+            if self.auth_cookie_samesite == "none" and not self.auth_cookie_secure:
+                raise ValueError("SameSite=None requires secure authentication cookies.")
+            jwt = self.jwt_secret or ""
+            if len(jwt) < 48 or any(marker in jwt.lower() for marker in placeholder_markers):
                 raise ValueError("A strong production JWT_SECRET is required.")
-            if any(not origin.startswith("https://") for origin in self.cors_origins):
+            for name, token in (
+                ("MODEL_API_TOKEN", self.model_api_token),
+                ("EMBEDDING_API_TOKEN", self.embedding_api_token),
+                ("RERANKER_API_TOKEN", self.reranker_api_token),
+            ):
+                if token and any(marker in token.lower() for marker in placeholder_markers):
+                    raise ValueError(f"{name} contains a placeholder.")
+            if not self.cors_origins or any(
+                origin == "*" or not origin.startswith("https://") for origin in self.cors_origins
+            ):
                 raise ValueError("Production CORS origins must use HTTPS.")
-            if "change-me" in self.database_url or "REPLACE" in self.database_url:
-                raise ValueError("Production DATABASE_URL contains a placeholder.")
-            if "REPLACE" in self.redis_url or "change-me" in self.redis_url:
-                raise ValueError("Production REDIS_URL contains a placeholder.")
-            if self.trusted_proxy_cidrs.strip() == "*":
+            validate_endpoint(
+                "DATABASE_URL",
+                self.database_url,
+                schemes={"postgresql", "postgresql+psycopg"},
+            )
+            database_sslmode = parse_qs(urlsplit(self.database_url).query).get("sslmode", [None])[
+                -1
+            ]
+            if database_sslmode not in {"require", "verify-ca", "verify-full"}:
+                raise ValueError("DATABASE_URL must enable PostgreSQL TLS in production.")
+            validate_endpoint("REDIS_URL", self.redis_url, schemes={"rediss"})
+            validate_endpoint(
+                "MODEL_API_BASE_URL",
+                self.model_api_base_url,
+                schemes={"https"},
+                allow_internal_http=True,
+            )
+            validate_endpoint(
+                "EMBEDDING_API_BASE_URL",
+                self.embedding_api_base_url,
+                schemes={"https"},
+                allow_internal_http=True,
+            )
+            if self.reranker_api_base_url:
+                validate_endpoint(
+                    "RERANKER_API_BASE_URL",
+                    self.reranker_api_base_url,
+                    schemes={"https"},
+                    allow_internal_http=True,
+                )
+            if self.postgres_sslmode not in {"require", "verify-ca", "verify-full"}:
+                raise ValueError("POSTGRES_SSLMODE must require TLS in production.")
+            if self.trusted_proxy_cidrs.strip() in {"*", "0.0.0.0/0", "::/0"}:
                 raise ValueError("Production trusted proxies must be explicit CIDRs.")
         return self
 

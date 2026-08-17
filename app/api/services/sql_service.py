@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -11,6 +10,8 @@ from sqlglot import exp
 
 from app.api.config import settings
 from app.api.services.sql_prompt_builder import SQLPromptBuilder
+from app.concurrency import api_blocking_io
+from app.operations.runtime_registry import ResolvedPrompt, render_prompt
 
 
 @dataclass
@@ -64,10 +65,12 @@ class SQLService:
         retriever,
         llm_service,
         explain_parameters: ExplainParameters | None = None,
+        prompt_template: ResolvedPrompt | None = None,
     ):
         self.retriever = retriever
         self.llm_service = llm_service
         self.explain_parameters = explain_parameters
+        self.prompt_template = prompt_template
 
     @staticmethod
     def extract_sql(answer: str) -> str | None:
@@ -163,7 +166,9 @@ class SQLService:
                     errors.append(f"Column is not present in indexed schema: {column.name}")
             used_columns.append(column.sql())
 
-        if tree.args.get("limit") is None and isinstance(tree, exp.Select):
+        if tree.args.get("limit") is None and isinstance(
+            tree, (exp.Select, exp.Union, exp.Intersect, exp.Except)
+        ):
             tree = tree.limit(self.DEFAULT_ROW_LIMIT)
             sql = tree.sql(dialect="postgres")
         explain_valid = None
@@ -201,7 +206,8 @@ class SQLService:
                     cursor.execute(f"EXPLAIN (FORMAT JSON) {sql}")
 
         try:
-            await asyncio.to_thread(execute)
+            # `sql` is emitted from a single, read-only SQLGlot AST validated above.
+            await api_blocking_io.call(execute)
             return True, None
         except psycopg.Error:
             return False, "Database rejected SQL during read-only EXPLAIN."
@@ -223,12 +229,22 @@ class SQLService:
             )
             if hasattr(docs, "__await__"):
                 docs = await docs
-        prompt = SQLPromptBuilder.build_generate_prompt(
-            question=question,
-            schema_docs=docs,
-            dialect="postgres",
-            max_context_chars=settings.model_max_context_chars,
-        )
+        if self.prompt_template is not None:
+            prompt = render_prompt(
+                self.prompt_template,
+                question=question,
+                context=SQLPromptBuilder._format_schema_context(
+                    docs, settings.model_max_context_chars
+                ),
+                mode="sql",
+            )
+        else:
+            prompt = SQLPromptBuilder.build_generate_prompt(
+                question=question,
+                schema_docs=docs,
+                dialect="postgres",
+                max_context_chars=settings.model_max_context_chars,
+            )
         answer = await self.llm_service.generate(
             prompt=prompt,
             max_new_tokens=max_new_tokens,
@@ -254,5 +270,9 @@ class SQLService:
             "mode": "sql",
             "confidence": {"validation": validation.to_dict()},
             "retrieved": docs,
-            "prompt_version": "sql-generation/1.0",
+            "prompt_version": (
+                f"{self.prompt_template.name}/{self.prompt_template.version}"
+                if self.prompt_template
+                else "sql-generation/legacy"
+            ),
         }

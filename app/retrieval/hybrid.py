@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections import defaultdict
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.concurrency import api_blocking_io
 from app.embeddings.client import EmbeddingClient
 from app.retrieval.contracts import RetrievalFilters, RetrievedChunk
 from app.state.models import (
@@ -27,6 +28,28 @@ class KnowledgeBaseAccessError(RuntimeError):
 class HybridRetrievalRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
+
+    @staticmethod
+    def lexical_expressions(query: str):
+        """Return mixed RU/EN/technical FTS rank and predicate expressions."""
+        simple_document = func.to_tsvector("simple", ContentBlob.content)
+        english_document = func.to_tsvector("english", ContentBlob.content)
+        russian_document = func.to_tsvector("russian", ContentBlob.content)
+        simple_query = func.websearch_to_tsquery("simple", query)
+        english_query = func.websearch_to_tsquery("english", query)
+        russian_query = func.websearch_to_tsquery("russian", query)
+        return (
+            func.greatest(
+                func.ts_rank_cd(simple_document, simple_query),
+                func.ts_rank_cd(english_document, english_query),
+                func.ts_rank_cd(russian_document, russian_query),
+            ),
+            or_(
+                simple_document.op("@@")(simple_query),
+                english_document.op("@@")(english_query),
+                russian_document.op("@@")(russian_query),
+            ),
+        )
 
     def resolve_knowledge_base(
         self, tenant_id: uuid.UUID, knowledge_base_id: uuid.UUID | None
@@ -98,11 +121,10 @@ class HybridRetrievalRepository:
                 .order_by(distance)
                 .limit(candidate_limit)
             ).all()
-            tsquery = func.websearch_to_tsquery("simple", query)
-            rank = func.ts_rank_cd(func.to_tsvector("simple", ContentBlob.content), tsquery)
+            rank, lexical_match = self.lexical_expressions(query)
             sparse = session.execute(
                 base.add_columns(rank.label("rank"))
-                .where(func.to_tsvector("simple", ContentBlob.content).op("@@")(tsquery))
+                .where(lexical_match)
                 .order_by(rank.desc(), DocumentChunk.id)
                 .limit(candidate_limit)
             ).all()
@@ -142,13 +164,13 @@ class HybridRetrievalRepository:
 
 
 class HybridRetriever:
-    def __init__(self, repository, embeddings: EmbeddingClient, reranker=None):
+    def __init__(self, repository, embeddings: EmbeddingClient | Any, reranker=None):
         self.repository = repository
         self.embeddings = embeddings
         self.reranker = reranker
 
     async def resolve_knowledge_base(self, tenant_id, knowledge_base_id):
-        return await asyncio.to_thread(
+        return await api_blocking_io.call(
             self.repository.resolve_knowledge_base, tenant_id, knowledge_base_id
         )
 
@@ -161,8 +183,13 @@ class HybridRetriever:
         top_k: int = 5,
         filters: RetrievalFilters | None = None,
     ) -> list[dict]:
-        vector = (await self.embeddings.embed([query]))[0]
-        rows = await asyncio.to_thread(
+        if hasattr(self.embeddings, "embed_for_index"):
+            vector = (await self.embeddings.embed_for_index(tenant_id, knowledge_base_id, [query]))[
+                0
+            ]
+        else:
+            vector = (await self.embeddings.embed([query]))[0]
+        rows = await api_blocking_io.call(
             self.repository.search,
             tenant_id,
             knowledge_base_id,

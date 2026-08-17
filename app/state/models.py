@@ -89,6 +89,12 @@ class IndexingRunStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class ScheduleAttemptStatus(str, enum.Enum):
+    PENDING = "pending"
+    ENQUEUED = "enqueued"
+    FAILED = "failed"
+
+
 class JDBCDriverRegistryEntry(Base):
     __tablename__ = "jdbc_driver_registry"
     __table_args__ = (
@@ -256,6 +262,12 @@ class Answer(Base):
     route_plan: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt_version: Mapped[str | None] = mapped_column(String(100))
+    model_definition_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="SET NULL")
+    )
+    prompt_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="SET NULL")
+    )
     latency_ms: Mapped[float | None] = mapped_column(Float)
     usage_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
@@ -453,6 +465,7 @@ class SourceVersion(TimestampMixin, Base):
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(String(100))
     failure_message: Mapped[str | None] = mapped_column(String(500))
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class SourceObject(Base):
@@ -734,6 +747,9 @@ class IndexingRun(Base):
     index_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("knowledge_index_versions.id", ondelete="CASCADE"), nullable=False
     )
+    model_definition_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="SET NULL")
+    )
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -789,6 +805,41 @@ class SourceSchedule(TimestampMixin, Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ScheduleAttempt(Base):
+    __tablename__ = "schedule_attempts"
+    __table_args__ = (
+        UniqueConstraint("schedule_id", "scheduled_for", name="uq_schedule_attempt_slot"),
+        Index("ix_schedule_attempts_due", "status", "next_attempt_at"),
+        Index("ix_schedule_attempts_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    schedule_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_schedules.id", ondelete="CASCADE"), nullable=False
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ingestion_runs.id", ondelete="SET NULL")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RetentionPolicy(TimestampMixin, Base):

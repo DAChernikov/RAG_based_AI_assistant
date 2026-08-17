@@ -163,10 +163,6 @@ class ApplicationRepository:
                 )
             )
 
-    def mark_running(self, job_id: uuid.UUID) -> InferenceJob | None:
-        claimed = self.claim_job(job_id, "legacy-worker", 300)
-        return claimed[0] if claimed else self.get_job(job_id)
-
     def claim_job(
         self, job_id: uuid.UUID, worker_id: str, lease_seconds: int
     ) -> tuple[InferenceJob, uuid.UUID] | None:
@@ -346,6 +342,8 @@ class ApplicationRepository:
                 route_plan=result.get("route_plan"),
                 model_name=model_name,
                 prompt_version=result.get("prompt_version"),
+                model_definition_id=result.get("model_definition_id"),
+                prompt_template_id=result.get("prompt_template_id"),
                 latency_ms=latency_ms,
                 usage_metadata=result.get("usage"),
             )

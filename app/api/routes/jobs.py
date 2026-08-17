@@ -22,11 +22,6 @@ class FeedbackRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
-def _require_queued(runtime: dict) -> None:
-    if runtime.get("execution_mode") != "queued":
-        raise HTTPException(status_code=409, detail="Endpoint requires queued execution mode.")
-
-
 async def _audit_not_found(
     request: Request,
     runtime: dict,
@@ -56,7 +51,6 @@ async def create_inference_job(
     runtime: dict = Depends(get_runtime_state),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    _require_queued(runtime)
     creation, contract = await _submit_queued(payload, runtime, idempotency_key, principal)
     base = str(request.base_url).rstrip("/")
     return InferenceJobAccepted(
@@ -77,7 +71,6 @@ async def get_inference_job(
     principal: Principal = Depends(require_scope("inference:read")),
     runtime: dict = Depends(get_runtime_state),
 ):
-    _require_queued(runtime)
     job = await runtime["repository"].get_job_for_owner(
         job_id, principal.tenant_id, principal.user_id
     )
@@ -95,7 +88,6 @@ async def inference_job_events(
     runtime: dict = Depends(get_runtime_state),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
-    _require_queued(runtime)
     if (
         await runtime["repository"].get_job_for_owner(
             job_id, principal.tenant_id, principal.user_id
@@ -126,7 +118,6 @@ async def conversation_history(
     principal: Principal = Depends(require_scope("inference:read")),
     runtime: dict = Depends(get_runtime_state),
 ):
-    _require_queued(runtime)
     try:
         return await runtime["repository"].conversation_history(
             conversation_id, principal.tenant_id, principal.user_id

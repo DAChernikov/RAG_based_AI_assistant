@@ -26,3 +26,4 @@ class BoundedThreadAdapter:
 
 
 api_blocking_io = BoundedThreadAdapter()
+connector_blocking_io = BoundedThreadAdapter(max_workers=4, max_pending=16)
