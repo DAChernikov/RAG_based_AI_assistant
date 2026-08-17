@@ -1,136 +1,185 @@
+name: rag-assistant
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-dev}
+  API_HOST: 0.0.0.0
+  TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1}
+  AUTH_DISABLED: ${AUTH_DISABLED:-false}
+  JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (at least 32 random characters)}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD}@postgres:5432/${POSTGRES_APP_DB:-rag}
+  REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
+  MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
+  GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
+  MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
+  EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-http://embedding-service:8001/v1}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+  EMBEDDING_API_TOKEN: ${EMBEDDING_API_TOKEN:-}
+
+x-service-security: &service-security
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9
     environment:
       POSTGRES_DB: ${POSTGRES_APP_DB:-rag}
       POSTGRES_USER: ${POSTGRES_APP_USER:-rag}
-      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:-rag-dev-only}
-    ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_APP_USER:-rag} -d ${POSTGRES_APP_DB:-rag}"]
+      test: [CMD-SHELL, "pg_isready -U ${POSTGRES_APP_USER:-rag} -d ${POSTGRES_APP_DB:-rag}"]
       interval: 5s
       timeout: 3s
-      retries: 20
-    mem_limit: 512m
+      retries: 30
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --maxmemory
-      - 256mb
-      - --maxmemory-policy
-      - noeviction
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    command: [redis-server, --appendonly, "yes", --requirepass, "${REDIS_PASSWORD:?Set REDIS_PASSWORD}", --maxmemory, 512mb, --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [CMD-SHELL, 'redis-cli -a "$${REDIS_PASSWORD}" ping | grep PONG']
       interval: 5s
       timeout: 3s
-      retries: 20
-    mem_limit: 320m
+      retries: 30
+    environment: { REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD}" }
     restart: unless-stopped
+
+  migrate:
+    build: { context: ., dockerfile: infra/api.Dockerfile }
+    environment: *app-env
+    command: [alembic, upgrade, head]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  embedding-service:
+    build: { context: ., dockerfile: infra/embedding.Dockerfile }
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_MODEL_VERSION: ${EMBEDDING_MODEL_VERSION:-bge-m3/1}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      EMBEDDING_CONCURRENCY: ${EMBEDDING_CONCURRENCY:-1}
+      HF_HOME: /models/huggingface
+    volumes: [model_cache:/models]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 20
+    <<: *service-security
+    read_only: false
+    mem_limit: ${EMBEDDING_MEMORY_LIMIT:-6g}
 
   api:
-    build:
-      context: .
-      dockerfile: infra/api.Dockerfile
-    environment:
-      INFERENCE_EXECUTION_MODE: queued
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:-rag-dev-only}@postgres:5432/${POSTGRES_APP_DB:-rag}
-      REDIS_URL: redis://redis:6379/0
-      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
-      GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
-      MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
-      AUTH_DISABLED: ${AUTH_DISABLED:-false}
-      JWT_SECRET: ${JWT_SECRET:-}
-    env_file:
-      - path: .env
-        required: false
-    ports:
-      - "8000:8000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    build: { context: ., dockerfile: infra/api.Dockerfile }
+    environment: *app-env
+    extra_hosts: [host.docker.internal:host-gateway]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    mem_limit: 512m
-    restart: unless-stopped
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      embedding-service: { condition: service_healthy }
+    <<: *service-security
+    mem_limit: 768m
 
-  worker:
-    build:
-      context: .
-      dockerfile: infra/worker.Dockerfile
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:-rag-dev-only}@postgres:5432/${POSTGRES_APP_DB:-rag}
-      REDIS_URL: redis://redis:6379/0
-      MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
-      GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
-      MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
-      WORKER_ID: ${WORKER_ID:-worker-1}
-      ARTIFACTS_DIR: /app/artifacts/artifacts_rag_baseline_latest
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - ./artifacts:/app/artifacts
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+  inference-worker:
+    build: { context: ., dockerfile: infra/worker.Dockerfile }
+    environment: { <<: *app-env, WORKER_ID: "${WORKER_ID:-inference-worker-1}" }
+    extra_hosts: [host.docker.internal:host-gateway]
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      embedding-service: { condition: service_healthy }
     stop_grace_period: 2m
-    mem_limit: 6g
-    restart: unless-stopped
+    healthcheck: &process-health
+      test: [CMD, python, -c, "import os; os.kill(1, 0)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    <<: *service-security
+    mem_limit: 1g
 
   ingestion-worker:
-    build:
-      context: .
-      dockerfile: infra/ingestion-worker.Dockerfile
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:-rag-dev-only}@postgres:5432/${POSTGRES_APP_DB:-rag}
-      REDIS_URL: redis://redis:6379/0
-      INGESTION_WORKER_ID: ${INGESTION_WORKER_ID:-ingestion-worker-1}
-    env_file:
-      - path: .env
-        required: false
+    build: { context: ., dockerfile: infra/ingestion-worker.Dockerfile }
+    environment: { <<: *app-env, INGESTION_WORKER_ID: "${INGESTION_WORKER_ID:-ingestion-worker-1}" }
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
     stop_grace_period: 2m
-    mem_limit: 512m
-    restart: unless-stopped
+    healthcheck: *process-health
+    <<: *service-security
+    mem_limit: 768m
+
+  indexing-worker:
+    build: { context: ., dockerfile: infra/worker.Dockerfile }
+    command: [python, -m, app.indexing_worker.main]
+    environment: { <<: *app-env, INDEXING_WORKER_ID: "${INDEXING_WORKER_ID:-indexing-worker-1}" }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      embedding-service: { condition: service_healthy }
+    stop_grace_period: 2m
+    healthcheck: *process-health
+    <<: *service-security
+    mem_limit: 768m
+
+  scheduler:
+    build: { context: ., dockerfile: infra/worker.Dockerfile }
+    command: [python, -m, app.scheduler.main]
+    environment: { <<: *app-env, SCHEDULER_ID: "${SCHEDULER_ID:-scheduler-1}" }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck: *process-health
+    <<: *service-security
+    mem_limit: 384m
+
+  web:
+    build: { context: ., dockerfile: infra/web.Dockerfile }
+    ports: ["${WEB_PORT:-8080}:8080"]
+    depends_on: { api: { condition: service_healthy } }
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/health]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    <<: *service-security
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    mem_limit: 128m
 
   bot:
-    build:
-      context: .
-      dockerfile: infra/bot.Dockerfile
+    build: { context: ., dockerfile: infra/bot.Dockerfile }
     environment:
       API_BASE_URL: http://api:8000
-      API_KEY: ${API_KEY:-}
-    env_file:
-      - path: .env
-        required: false
-    depends_on:
-      - api
-    profiles: ["bot"]
+      API_KEY: ${TELEGRAM_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    depends_on: { api: { condition: service_healthy } }
+    profiles: [telegram]
+    healthcheck: *process-health
+    <<: *service-security
     mem_limit: 256m
+
+  ollama:
+    image: ollama/ollama:0.5.7
+    volumes: [ollama_data:/root/.ollama]
+    profiles: [cpu-model]
     restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
+  model_cache:
+  ollama_data:

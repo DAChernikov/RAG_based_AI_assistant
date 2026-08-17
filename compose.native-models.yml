@@ -1,0 +1,18 @@
+services:
+  api:
+    environment:
+      EMBEDDING_API_BASE_URL: http://host.docker.internal:8001/v1
+    depends_on:
+      embedding-service: { condition: service_started, required: false }
+  inference-worker:
+    environment:
+      EMBEDDING_API_BASE_URL: http://host.docker.internal:8001/v1
+    depends_on:
+      embedding-service: { condition: service_started, required: false }
+  indexing-worker:
+    environment:
+      EMBEDDING_API_BASE_URL: http://host.docker.internal:8001/v1
+    depends_on:
+      embedding-service: { condition: service_started, required: false }
+  embedding-service:
+    profiles: [container-embedding-disabled]

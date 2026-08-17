@@ -22,3 +22,8 @@ data
 *.pt
 *.pth
 README 2.md
+web/node_modules
+web/dist
+web/playwright-report
+web/test-results
+build

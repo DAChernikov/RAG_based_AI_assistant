@@ -1,0 +1,9 @@
+{
+  "title": "RAG Assistant Operations",
+  "schemaVersion": 39,
+  "panels": [
+    {"type": "timeseries", "title": "Application events", "targets": [{"expr": "sum by (event) (rate(rag_events_total[5m]))"}]},
+    {"type": "timeseries", "title": "Job duration p95", "targets": [{"expr": "histogram_quantile(0.95, sum by (le, job_type) (rate(rag_job_duration_seconds_bucket[5m])))"}]},
+    {"type": "stat", "title": "API targets ready", "targets": [{"expr": "sum(up{job=\"rag-api\"})"}]}
+  ]
+}

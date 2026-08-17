@@ -1,7 +1,8 @@
 PYTHON_PATHS = app tests migrations/env.py migrations/versions research/src
 
 install:
-	poetry install --with bot,worker,research,dev
+	poetry install --with bot,embedding,research,dev
+	cd web && npm ci
 
 run-api:
 	poetry run python -m uvicorn app.api.main:app --host 127.0.0.1 --port 8000
@@ -17,6 +18,12 @@ run-worker:
 
 run-ingestion-worker:
 	poetry run python -m app.ingestion_worker.main
+
+run-indexing-worker:
+	poetry run python -m app.indexing_worker.main
+
+run-scheduler:
+	poetry run python -m app.scheduler.main
 
 migrate:
 	poetry run alembic upgrade head
@@ -58,7 +65,28 @@ format-check:
 lint:
 	poetry run ruff check $(PYTHON_PATHS)
 
-check: format-check lint test
+type-check:
+	poetry run mypy app
+
+security-check:
+	poetry run bandit -c pyproject.toml -r app
+	poetry run pip-audit --cache-dir .cache/pip-audit
+
+frontend-check:
+	cd web && npm run lint && npm run test && npm run build
+
+evaluation:
+	poetry run python -m research.src.product_evaluation
+
+evaluation-real:
+	@test "$(RUN_REAL_MODEL_EVAL)" = "1" || (echo "Set RUN_REAL_MODEL_EVAL=1"; exit 2)
+	poetry run pytest -m real_model
+
+sbom:
+	mkdir -p build
+	poetry run cyclonedx-py environment --output-reproducible -o build/backend-sbom.json
+
+check: format-check lint type-check test frontend-check
 
 infra-up:
 	docker compose up -d postgres redis

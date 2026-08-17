@@ -1,0 +1,98 @@
+name: quality
+on:
+  pull_request:
+  push:
+    branches: [main, feature/product-v1]
+  workflow_dispatch:
+
+permissions: { contents: read }
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.0-pg16
+        env: { POSTGRES_DB: rag, POSTGRES_USER: rag, POSTGRES_PASSWORD: test-only-password }
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4.2-alpine
+        ports: [6379:6379]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+    env:
+      APP_ENV: test
+      AUTH_DISABLED: true
+      JWT_SECRET: test-only-jwt-secret-with-more-than-thirty-two-characters
+      DATABASE_URL: postgresql+psycopg://rag:test-only-password@127.0.0.1:5432/rag
+      INTEGRATION_DATABASE_URL: postgresql+psycopg://rag:test-only-password@127.0.0.1:5432/rag
+      REDIS_URL: redis://127.0.0.1:6379/0
+      INTEGRATION_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install poetry==2.1.4
+      - run: poetry install --with bot,dev
+      - run: poetry check --lock
+      - run: poetry run black --check app tests migrations research/src
+      - run: poetry run ruff check app tests migrations research/src
+      - run: poetry run mypy app
+      - run: poetry run bandit -c pyproject.toml -r app
+      - run: poetry run pip-audit --cache-dir .cache/pip-audit
+      - run: poetry run alembic upgrade head
+      - run: poetry run alembic downgrade -1 && poetry run alembic upgrade head
+      - run: poetry run pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=80
+      - run: git diff --check
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm run test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: npm audit --audit-level=high
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run e2e
+        working-directory: web
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: docker compose build api inference-worker ingestion-worker indexing-worker scheduler embedding-service web
+      - run: docker compose --profile telegram build bot
+      - uses: aquasecurity/trivy-action@0.28.0
+        with: { scan-type: fs, severity: HIGH,CRITICAL, exit-code: "1", ignore-unfixed: true }
+      - uses: anchore/sbom-action@v0
+        with: { path: ., format: cyclonedx-json, output-file: sbom.cdx.json }
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/rag-assistant
+      - run: helm template test deploy/helm/rag-assistant > /tmp/rendered.yaml
+
+  release-verification:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: [backend, frontend, supply-chain]
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Release artifacts verified; publishing requires a separately approved workflow."

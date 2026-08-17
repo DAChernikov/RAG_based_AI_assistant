@@ -1,0 +1,36 @@
+image:
+  repository: ghcr.io/example/rag-assistant
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+webImage:
+  repository: ghcr.io/example/rag-assistant-web
+  tag: "1.0.0"
+embeddingImage:
+  repository: ghcr.io/example/rag-assistant-embedding
+  tag: "1.0.0"
+config:
+  appEnv: production
+  modelApiBaseUrl: https://generation.internal.example.invalid/v1
+  generationModel: qwen2.5-coder-7b-instruct
+  embeddingApiBaseUrl: http://rag-assistant-embedding:8001/v1
+  corsAllowedOrigins: https://assistant.example.invalid
+existingSecret: rag-assistant-secrets
+ingress:
+  enabled: true
+  className: nginx
+  host: assistant.example.invalid
+  tlsSecretName: rag-assistant-tls
+embedding:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 20Gi
+resources:
+  api: { requests: { cpu: 250m, memory: 384Mi }, limits: { cpu: "2", memory: 1Gi } }
+  worker: { requests: { cpu: 250m, memory: 384Mi }, limits: { cpu: "2", memory: 1Gi } }
+  embedding: { requests: { cpu: "2", memory: 4Gi }, limits: { cpu: "8", memory: 12Gi } }
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70

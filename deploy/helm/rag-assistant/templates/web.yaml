@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: rag-assistant-web, labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: web } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: web } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: web } }
+    spec:
+      serviceAccountName: rag-assistant-web
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: web
+          image: "{{ .Values.webImage.repository }}:{{ .Values.webImage.tag }}"
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /, port: http } }
+          livenessProbe: { httpGet: { path: /, port: http } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 128Mi } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }, { name: cache, mountPath: /var/cache/nginx }, { name: run, mountPath: /var/run }]
+      volumes: [{ name: tmp, emptyDir: {} }, { name: cache, emptyDir: {} }, { name: run, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: rag-assistant-web }
+spec: { selector: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: web }, ports: [{ name: http, port: 8080, targetPort: http }] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: rag-assistant-api }
+spec: { selector: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: api }, ports: [{ name: http, port: 8000, targetPort: http }] }

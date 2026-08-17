@@ -1,0 +1,9 @@
+services:
+  postgres:
+    ports: ["${POSTGRES_HOST_PORT:-55432}:5432"]
+  redis:
+    ports: ["${REDIS_HOST_PORT:-56379}:6379"]
+  api:
+    ports: ["${API_HOST_PORT:-8000}:8000"]
+  embedding-service:
+    ports: ["${EMBEDDING_HOST_PORT:-8001}:8001"]

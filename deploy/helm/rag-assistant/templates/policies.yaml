@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: rag-assistant-default-deny }
+spec: { podSelector: {}, policyTypes: [Ingress, Egress] }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: rag-assistant-application }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: rag-assistant } }
+  policyTypes: [Ingress, Egress]
+  ingress: [{ from: [{ namespaceSelector: {} }], ports: [{ protocol: TCP, port: 8000 }, { protocol: TCP, port: 8080 }, { protocol: TCP, port: 8001 }] }]
+  egress: [{ to: [{ namespaceSelector: {} }] }, { to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16] } }] }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: rag-assistant-api }
+spec: { minAvailable: 1, selector: { matchLabels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: api } } }
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: rag-assistant-api }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: rag-assistant-api }
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }} } } }]
+{{- end }}

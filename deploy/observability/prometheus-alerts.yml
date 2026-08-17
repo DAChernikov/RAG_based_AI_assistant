@@ -1,0 +1,18 @@
+groups:
+  - name: rag-assistant
+    rules:
+      - alert: RagApiDown
+        expr: up{job="rag-api"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "RAG API is not ready"}
+      - alert: RagWorkerFailureBurst
+        expr: increase(rag_events_total{event=~".*failed.*|.*dlq.*"}[10m]) > 3
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Repeated worker failures or DLQ activity"}
+      - alert: RagSlowJobs
+        expr: histogram_quantile(0.95, sum by (le, job_type) (rate(rag_job_duration_seconds_bucket[10m]))) > 300
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "95th percentile job duration exceeds five minutes"}

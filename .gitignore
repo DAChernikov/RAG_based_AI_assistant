@@ -118,6 +118,7 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+!.env.production.example
 .envrc
 .venv
 .venv/
@@ -203,3 +204,10 @@ research/cache/
 *.safetensors
 *.pt
 *.pth
+
+# Web build and test artifacts
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/*.tsbuildinfo

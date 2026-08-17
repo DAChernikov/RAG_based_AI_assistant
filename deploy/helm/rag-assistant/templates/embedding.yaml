@@ -1,0 +1,44 @@
+{{- if .Values.embedding.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: rag-assistant-embedding, labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: embedding } }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: embedding } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: embedding } }
+    spec:
+      serviceAccountName: rag-assistant-embedding
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: embedding
+          image: "{{ .Values.embeddingImage.repository }}:{{ .Values.embeddingImage.tag }}"
+          envFrom: [{ configMapRef: { name: rag-assistant-config } }]
+          ports: [{ name: http, containerPort: 8001 }]
+          readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 15 }
+          livenessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 30 }
+          resources: {{ toYaml .Values.resources.embedding | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: models, mountPath: /models }, { name: tmp, mountPath: /tmp }]
+      volumes:
+        - name: models
+          {{- if .Values.embedding.persistence.enabled }}
+          persistentVolumeClaim: { claimName: rag-assistant-model-cache }
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: rag-assistant-embedding }
+spec: { selector: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: embedding }, ports: [{ name: http, port: 8001, targetPort: http }] }
+{{- if .Values.embedding.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: rag-assistant-model-cache }
+spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: {{ .Values.embedding.persistence.size }} } } }
+{{- end }}
+{{- end }}
