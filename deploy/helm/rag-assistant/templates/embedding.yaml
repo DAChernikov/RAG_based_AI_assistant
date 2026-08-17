@@ -13,13 +13,15 @@ spec:
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: embedding
-          image: "{{ .Values.embeddingImage.repository }}:{{ .Values.embeddingImage.tag }}"
+          image: {{ include "rag.image" .Values.embeddingImage | quote }}
+          imagePullPolicy: {{ .Values.embeddingImage.pullPolicy }}
           envFrom: [{ configMapRef: { name: rag-assistant-config } }]
           ports: [{ name: http, containerPort: 8001 }]
+          startupProbe: { httpGet: { path: /ready, port: http }, failureThreshold: 120, periodSeconds: 5 }
           readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 15 }
           livenessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 30 }
           resources: {{ toYaml .Values.resources.embedding | nindent 12 }}
-          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
           volumeMounts: [{ name: models, mountPath: /models }, { name: tmp, mountPath: /tmp }]
       volumes:
         - name: models

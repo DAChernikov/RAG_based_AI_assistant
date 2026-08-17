@@ -45,14 +45,17 @@ test:
 	poetry run pytest -m "not integration"
 
 integration-test:
-	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-postgresql+psycopg://rag:rag-dev-only@127.0.0.1:5432/rag} \
-	INTEGRATION_REDIS_URL=$${INTEGRATION_REDIS_URL:-redis://127.0.0.1:6379/15} \
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-postgresql+psycopg://rag:local-only-change-this-password@127.0.0.1:55432/rag} \
+	INTEGRATION_REDIS_URL=$${INTEGRATION_REDIS_URL:-redis://:local-only-change-this-password@127.0.0.1:56379/15} \
 	poetry run pytest -m integration
 
 smoke-test:
-	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-postgresql+psycopg://rag:rag-dev-only@127.0.0.1:5432/rag} \
-	INTEGRATION_REDIS_URL=$${INTEGRATION_REDIS_URL:-redis://127.0.0.1:6379/15} \
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-postgresql+psycopg://rag:local-only-change-this-password@127.0.0.1:55432/rag} \
+	INTEGRATION_REDIS_URL=$${INTEGRATION_REDIS_URL:-redis://:local-only-change-this-password@127.0.0.1:56379/15} \
 	poetry run pytest -m integration tests/integration/test_smoke.py
+
+validate-production-config:
+	poetry run python -m app.state.validate_config
 
 fmt:
 	poetry run black $(PYTHON_PATHS)

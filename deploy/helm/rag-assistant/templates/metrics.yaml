@@ -1,0 +1,23 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-assistant-metrics
+  labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: metrics }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: api }
+  ports: [{ name: metrics, port: 8000, targetPort: http }]
+{{- if .Values.metrics.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rag-assistant
+  namespace: {{ .Values.metrics.serviceMonitor.namespace }}
+spec:
+  selector: { matchLabels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: metrics } }
+  namespaceSelector: { matchNames: [{{ .Release.Namespace }}] }
+  endpoints: [{ port: metrics, path: /metrics, interval: 30s }]
+{{- end }}
+{{- end }}

@@ -4,16 +4,27 @@ x-app-env: &app-env
   APP_ENV: ${APP_ENV:-dev}
   API_HOST: 0.0.0.0
   TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   AUTH_DISABLED: ${AUTH_DISABLED:-false}
   JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (at least 32 random characters)}
-  DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-rag}:${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD}@postgres:5432/${POSTGRES_APP_DB:-rag}
-  REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
+  AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+  AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+  REDIS_URL: ${REDIS_URL:?Set REDIS_URL in .env}
   MODEL_API_BASE_URL: ${MODEL_API_BASE_URL:-http://host.docker.internal:11434/v1}
   GENERATION_MODEL: ${GENERATION_MODEL:-qwen2.5-coder:7b}
   MODEL_API_TOKEN: ${MODEL_API_TOKEN:-}
+  MODEL_HTTP_ALLOWED_HOSTS: ${MODEL_HTTP_ALLOWED_HOSTS:-}
   EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-http://embedding-service:8001/v1}
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+  EMBEDDING_MODEL_VERSION: ${EMBEDDING_MODEL_VERSION:-bge-m3/1}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
   EMBEDDING_API_TOKEN: ${EMBEDDING_API_TOKEN:-}
+  RERANKER_API_BASE_URL: ${RERANKER_API_BASE_URL:-}
+  RERANKER_API_TOKEN: ${RERANKER_API_TOKEN:-}
+  SQL_ENABLE_EXPLAIN_VALIDATION: ${SQL_ENABLE_EXPLAIN_VALIDATION:-false}
+  SQL_EXPLAIN_TIMEOUT_SEC: ${SQL_EXPLAIN_TIMEOUT_SEC:-10}
 
 x-service-security: &service-security
   read_only: true
@@ -50,6 +61,7 @@ services:
     restart: unless-stopped
 
   migrate:
+    image: ${API_IMAGE:-rag-assistant-api:local}
     build: { context: ., dockerfile: infra/api.Dockerfile }
     environment: *app-env
     command: [alembic, upgrade, head]
@@ -62,6 +74,7 @@ services:
       postgres: { condition: service_healthy }
 
   embedding-service:
+    image: ${EMBEDDING_IMAGE:-rag-assistant-embedding:local}
     build: { context: ., dockerfile: infra/embedding.Dockerfile }
     environment:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
@@ -71,7 +84,7 @@ services:
       HF_HOME: /models/huggingface
     volumes: [model_cache:/models]
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/ready', timeout=2)"]
       interval: 15s
       timeout: 3s
       retries: 20
@@ -80,6 +93,7 @@ services:
     mem_limit: ${EMBEDDING_MEMORY_LIMIT:-6g}
 
   api:
+    image: ${API_IMAGE:-rag-assistant-api:local}
     build: { context: ., dockerfile: infra/api.Dockerfile }
     environment: *app-env
     extra_hosts: [host.docker.internal:host-gateway]
@@ -96,6 +110,7 @@ services:
     mem_limit: 768m
 
   inference-worker:
+    image: ${WORKER_IMAGE:-rag-assistant-worker:local}
     build: { context: ., dockerfile: infra/worker.Dockerfile }
     environment: { <<: *app-env, WORKER_ID: "${WORKER_ID:-inference-worker-1}" }
     extra_hosts: [host.docker.internal:host-gateway]
@@ -104,26 +119,34 @@ services:
       redis: { condition: service_healthy }
       embedding-service: { condition: service_healthy }
     stop_grace_period: 2m
-    healthcheck: &process-health
-      test: [CMD, python, -c, "import os; os.kill(1, 0)"]
+    healthcheck:
+      test: [CMD, python, -m, app.worker_healthcheck, inference, --readiness]
       interval: 15s
       timeout: 3s
-      retries: 3
+      retries: 5
+      start_period: 30s
     <<: *service-security
     mem_limit: 1g
 
   ingestion-worker:
+    image: ${INGESTION_IMAGE:-rag-assistant-ingestion:local}
     build: { context: ., dockerfile: infra/ingestion-worker.Dockerfile }
     environment: { <<: *app-env, INGESTION_WORKER_ID: "${INGESTION_WORKER_ID:-ingestion-worker-1}" }
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
     stop_grace_period: 2m
-    healthcheck: *process-health
+    healthcheck:
+      test: [CMD, python, -m, app.worker_healthcheck, ingestion, --readiness]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     <<: *service-security
     mem_limit: 768m
 
   indexing-worker:
+    image: ${WORKER_IMAGE:-rag-assistant-worker:local}
     build: { context: ., dockerfile: infra/worker.Dockerfile }
     command: [python, -m, app.indexing_worker.main]
     environment: { <<: *app-env, INDEXING_WORKER_ID: "${INDEXING_WORKER_ID:-indexing-worker-1}" }
@@ -132,22 +155,34 @@ services:
       redis: { condition: service_healthy }
       embedding-service: { condition: service_healthy }
     stop_grace_period: 2m
-    healthcheck: *process-health
+    healthcheck:
+      test: [CMD, python, -m, app.worker_healthcheck, indexing, --readiness]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     <<: *service-security
     mem_limit: 768m
 
   scheduler:
+    image: ${WORKER_IMAGE:-rag-assistant-worker:local}
     build: { context: ., dockerfile: infra/worker.Dockerfile }
     command: [python, -m, app.scheduler.main]
     environment: { <<: *app-env, SCHEDULER_ID: "${SCHEDULER_ID:-scheduler-1}" }
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
-    healthcheck: *process-health
+    healthcheck:
+      test: [CMD, python, -m, app.worker_healthcheck, scheduler, --readiness]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     <<: *service-security
     mem_limit: 384m
 
   web:
+    image: ${WEB_IMAGE:-rag-assistant-web:local}
     build: { context: ., dockerfile: infra/web.Dockerfile }
     ports: ["${WEB_PORT:-8080}:8080"]
     depends_on: { api: { condition: service_healthy } }
@@ -161,6 +196,7 @@ services:
     mem_limit: 128m
 
   bot:
+    image: ${BOT_IMAGE:-rag-assistant-bot:local}
     build: { context: ., dockerfile: infra/bot.Dockerfile }
     environment:
       API_BASE_URL: http://api:8000
@@ -168,12 +204,16 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     depends_on: { api: { condition: service_healthy } }
     profiles: [telegram]
-    healthcheck: *process-health
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://api:8000/ready', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
     <<: *service-security
     mem_limit: 256m
 
   ollama:
-    image: ollama/ollama:0.5.7
+    image: ollama/ollama:0.5.7@sha256:4ee6d2970aad83e7e814f1bac3c0af839f3123e297cf801f526b28ff65132604
     volumes: [ollama_data:/root/.ollama]
     profiles: [cpu-model]
     restart: unless-stopped

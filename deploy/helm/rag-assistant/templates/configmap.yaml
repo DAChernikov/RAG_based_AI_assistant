@@ -11,4 +11,5 @@ data:
   MODEL_API_BASE_URL: {{ .Values.config.modelApiBaseUrl | quote }}
   GENERATION_MODEL: {{ .Values.config.generationModel | quote }}
   EMBEDDING_API_BASE_URL: {{ .Values.config.embeddingApiBaseUrl | quote }}
+  MODEL_HTTP_ALLOWED_HOSTS: "rag-assistant-embedding"
   CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}

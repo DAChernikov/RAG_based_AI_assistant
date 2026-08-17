@@ -1,13 +1,23 @@
-image:
+commonImage:
   repository: ghcr.io/example/rag-assistant
   tag: "1.0.0"
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  pullPolicy: IfNotPresent
+ingestionImage:
+  repository: ghcr.io/example/rag-assistant-ingestion
+  tag: "1.0.0"
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   pullPolicy: IfNotPresent
 webImage:
   repository: ghcr.io/example/rag-assistant-web
   tag: "1.0.0"
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  pullPolicy: IfNotPresent
 embeddingImage:
   repository: ghcr.io/example/rag-assistant-embedding
   tag: "1.0.0"
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  pullPolicy: IfNotPresent
 config:
   appEnv: production
   modelApiBaseUrl: https://generation.internal.example.invalid/v1
@@ -20,6 +30,17 @@ ingress:
   className: nginx
   host: assistant.example.invalid
   tlsSecretName: rag-assistant-tls
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector: { kubernetes.io/metadata.name: ingress-nginx }
+  monitoringNamespaceSelector: { kubernetes.io/metadata.name: monitoring }
+  privateEndpointCidrs: []
+  connectorDestinationCidrs: []
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+    namespace: monitoring
 embedding:
   enabled: true
   persistence:

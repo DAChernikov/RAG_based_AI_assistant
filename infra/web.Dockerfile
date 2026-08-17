@@ -1,7 +1,7 @@
 FROM node:22.13.1-alpine@sha256:e2b39f7b64281324929257d0f8004fb6cb4bf0fdfb9aa8cedb235a766aec31da AS builder
 WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY web ./
 RUN npm run build
 

@@ -16,8 +16,13 @@ spec:
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: {{ $component }}
-          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
-          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          {{- if eq $component "ingestion-worker" }}
+          image: {{ include "rag.image" $root.Values.ingestionImage | quote }}
+          imagePullPolicy: {{ $root.Values.ingestionImage.pullPolicy }}
+          {{- else }}
+          image: {{ include "rag.image" $root.Values.commonImage | quote }}
+          imagePullPolicy: {{ $root.Values.commonImage.pullPolicy }}
+          {{- end }}
           {{- if eq $component "inference-worker" }}
           command: [python, -m, app.worker.main]
           {{- else if eq $component "ingestion-worker" }}
@@ -37,8 +42,10 @@ spec:
           livenessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 15 }
           readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 10 }
           {{- else }}
-          livenessProbe: { exec: { command: [python, -c, "import os; os.kill(1, 0)"] }, periodSeconds: 15 }
-          readinessProbe: { exec: { command: [python, -c, "import os; os.kill(1, 0)"] }, periodSeconds: 10 }
+          {{- $role := trimSuffix "-worker" $component }}
+          startupProbe: { exec: { command: [python, -m, app.worker_healthcheck, {{ $role }}, --readiness] }, failureThreshold: 30, periodSeconds: 5 }
+          livenessProbe: { exec: { command: [python, -m, app.worker_healthcheck, {{ $role }}] }, periodSeconds: 15, timeoutSeconds: 3 }
+          readinessProbe: { exec: { command: [python, -m, app.worker_healthcheck, {{ $role }}, --readiness] }, periodSeconds: 10, timeoutSeconds: 3 }
           {{- end }}
       volumes: [{ name: tmp, emptyDir: {} }]
 {{- end }}
