@@ -2,9 +2,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BotSettings(BaseSettings):
-    telegram_bot_token: str | None = None
     api_base_url: str = "http://api:8000"
-    api_key: str | None = None
+    bot_config_reload_interval_sec: float = 5.0
     request_timeout: float = 90.0
     stream_connect_timeout: float = 10.0
     stream_read_timeout: float = 120.0

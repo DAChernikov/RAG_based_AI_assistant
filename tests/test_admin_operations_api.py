@@ -99,6 +99,19 @@ class Embedding:
         return {"status": "ready", "model_ready": True}
 
 
+class Generation:
+    async def readiness(self):
+        return {"ready": True, "authorization": "must-not-leave-runtime"}
+
+    async def aclose(self):
+        return None
+
+
+class RuntimeRegistry:
+    def generation_client(self, _model):
+        return Generation()
+
+
 def build_client():
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
@@ -138,6 +151,7 @@ def build_client():
         "catalog_service": CatalogService(SimpleNamespace()),
         "auth_repository": AuthRepository(factory),
         "settings": settings,
+        "runtime_registry": RuntimeRegistry(),
     }
     app = FastAPI()
 
@@ -188,6 +202,24 @@ def test_typed_operations_api_crud_activation_retention_and_audit_export():
         },
     )
     assert model.status_code == 201
+    repeated = client.post(
+        "/v1/admin/models",
+        json={
+            "role": "generation",
+            "model_id": "qwen",
+            "version": "1",
+            "endpoint_ref": "endpoint:generation",
+            "capabilities": {"stream": True},
+        },
+    )
+    assert repeated.status_code == 201 and repeated.json()["id"] == model.json()["id"]
+    checked = client.post(f"/v1/admin/models/{model.json()['id']}/test")
+    assert checked.json() == {
+        "status": "ready",
+        "model_id": "qwen",
+        "version": "1",
+    }
+    assert "authorization" not in checked.text
     assert client.post(f"/v1/admin/models/{model.json()['id']}/activate").json()["is_active"]
     assert client.get("/v1/admin/models").json()[0]["model_id"] == "qwen"
 

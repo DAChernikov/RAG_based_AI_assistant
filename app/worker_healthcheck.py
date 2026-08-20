@@ -30,6 +30,7 @@ def _identity(role: str) -> tuple[str | None, str | None]:
         "ingestion": (settings.ingestion_heartbeat_prefix, settings.ingestion_worker_id),
         "indexing": (settings.indexing_heartbeat_prefix, settings.indexing_worker_id),
         "scheduler": (None, None),
+        "bot": (None, None),
     }
     if role not in values:
         raise ValueError("Unknown worker role.")
@@ -53,7 +54,7 @@ async def check(role: str, readiness: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Worker liveness/readiness probe")
-    parser.add_argument("role", choices=("inference", "ingestion", "indexing", "scheduler"))
+    parser.add_argument("role", choices=("inference", "ingestion", "indexing", "scheduler", "bot"))
     parser.add_argument("--readiness", action="store_true")
     args = parser.parse_args()
     asyncio.run(check(args.role, args.readiness))

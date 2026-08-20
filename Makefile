@@ -27,6 +27,12 @@ run-indexing-worker:
 run-scheduler:
 	poetry run python -m app.scheduler.main
 
+dev-up:
+	./scripts/dev-up
+
+dev-down:
+	./scripts/dev-down
+
 migrate:
 	poetry run alembic upgrade head
 

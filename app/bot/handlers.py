@@ -14,6 +14,12 @@ from app.bot.api_client import APIClient
 
 api_client = APIClient()
 
+
+def _api(context: ContextTypes.DEFAULT_TYPE) -> APIClient:
+    application = getattr(context, "application", None)
+    return application.bot_data.get("api_client", api_client) if application else api_client
+
+
 TELEGRAM_MESSAGE_LIMIT = 4096
 SAFE_MESSAGE_LIMIT = 3950
 CODE_FENCE_RE = re.compile(r"```(\w+)?\s*\n?(.*?)```", flags=re.DOTALL)
@@ -206,7 +212,7 @@ async def ready_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        data = await api_client.ready()
+        data = await _api(context).ready()
         components = data.get("components", {})
         text = (
             "Статус API:\n"
@@ -241,7 +247,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             action=ChatAction.TYPING,
         )
 
-        data = await api_client.ask(question=question)
+        data = await _api(context).ask(question=question)
         final_text = _build_final_text(data.get("answer", ""), data)
         await _safe_edit_or_reply(update, placeholder_message, final_text)
 

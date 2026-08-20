@@ -1,5 +1,5 @@
 {{- $root := . -}}
-{{- range $component := list "api" "inference-worker" "ingestion-worker" "indexing-worker" "scheduler" }}
+{{- range $component := list "api" "inference-worker" "ingestion-worker" "indexing-worker" "scheduler" "bot" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -7,7 +7,7 @@ metadata:
   name: rag-assistant-{{ $component }}
   labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: {{ $component }} }
 spec:
-  replicas: {{ if eq $component "scheduler" }}1{{ else }}2{{ end }}
+  replicas: {{ if or (eq $component "scheduler") (eq $component "bot") }}1{{ else }}2{{ end }}
   selector: { matchLabels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: {{ $component }} } }
   template:
     metadata: { labels: { app.kubernetes.io/name: rag-assistant, app.kubernetes.io/component: {{ $component }} } }
@@ -19,6 +19,9 @@ spec:
           {{- if eq $component "ingestion-worker" }}
           image: {{ include "rag.image" $root.Values.ingestionImage | quote }}
           imagePullPolicy: {{ $root.Values.ingestionImage.pullPolicy }}
+          {{- else if eq $component "bot" }}
+          image: {{ include "rag.image" $root.Values.botImage | quote }}
+          imagePullPolicy: {{ $root.Values.botImage.pullPolicy }}
           {{- else }}
           image: {{ include "rag.image" $root.Values.commonImage | quote }}
           imagePullPolicy: {{ $root.Values.commonImage.pullPolicy }}
@@ -31,6 +34,8 @@ spec:
           command: [python, -m, app.indexing_worker.main]
           {{- else if eq $component "scheduler" }}
           command: [python, -m, app.scheduler.main]
+          {{- else if eq $component "bot" }}
+          command: [python, -m, app.bot.main]
           {{- end }}
           envFrom: [{ configMapRef: { name: rag-assistant-config } }, { secretRef: { name: {{ $root.Values.existingSecret }} } }]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
@@ -40,7 +45,8 @@ spec:
           ports: [{ name: http, containerPort: 8000 }]
           startupProbe: { httpGet: { path: /health, port: http }, failureThreshold: 30, periodSeconds: 5 }
           livenessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 15 }
-          readinessProbe: { httpGet: { path: /ready, port: http }, periodSeconds: 10 }
+          # Keep Setup Wizard routable while product readiness reports model_loading.
+          readinessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 10 }
           {{- else }}
           {{- $role := trimSuffix "-worker" $component }}
           startupProbe: { exec: { command: [python, -m, app.worker_healthcheck, {{ $role }}, --readiness] }, failureThreshold: 30, periodSeconds: 5 }

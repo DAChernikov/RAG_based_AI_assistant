@@ -6,24 +6,32 @@
 
 PostgreSQL с pgvector — единственный system of record. Redis Streams используются только для доставки и coordination. API, inference/ingestion/indexing workers и scheduler — отдельные процессы модульного монолита; model services изолированы по HTTP. Web UI обслуживается Nginx. Tenant берётся только из authenticated principal, а composite constraints защищают ключевые связи в БД.
 
-Подробности: [целевая архитектура](docs/architecture/target-architecture.md), [runtime ADR](docs/decisions/ADR-010-final-product-runtime.md), [API](docs/api/inference-contracts.md), [threat model](docs/security/threat-model.md).
+Подробности: [целевая архитектура](docs/architecture/target-architecture.md), [runtime ADR](docs/decisions/ADR-010-final-product-runtime.md), [inference API](docs/api/inference-contracts.md), [setup/admin API](docs/api/setup-administration.md), [threat model](docs/security/threat-model.md).
 
 ## Быстрый локальный запуск
 
 Требуются Docker/Compose, 12 ГБ RAM для CPU embedding-профиля и нативный Ollama/llama.cpp для macOS. Модели не скачиваются при build или startup API.
 
+Подготовьте `qwen2.5-coder:7b` в нативном Ollama/llama.cpp, затем используйте один UI-first запуск:
+
 ```bash
-cp .env.example .env
-# замените только local-only placeholders; подготовьте qwen2.5-coder:7b в Ollama вручную
-docker compose up --build
-docker compose ps
-curl -fsS http://localhost:8080/health
-curl -fsS http://localhost:8080/ready
+./scripts/dev-up
+# Windows PowerShell: ./scripts/dev-up.ps1
 ```
 
-Default Compose запускает CPU embedding service с `EMBEDDING_WARMUP=true`: на пустом `model_cache` он загружает BGE-M3, и `/ready` остаётся `503` до фактической загрузки модели. Первый запуск может занять десятки минут; `EMBEDDING_HEALTH_START_PERIOD` по умолчанию равен `30m`. API стартует только после успешной embedding readiness, но warmup начинается независимо в самом embedding-контейнере, поэтому ожидание не образует deadlock.
+Скрипт один раз создаёт защищённый `.env.local` из safe dev template и выполняет именно:
 
-На macOS generation server остаётся нативным и доступен контейнерам по `host.docker.internal:11434`. Для заранее запущенного нативного embedding endpoint используйте `-f compose.native-models.yml`; dev-порты БД/Redis включаются только через `-f compose.dev.yml`. Создание первого администратора выполняется внутри уже запущенного API-контейнера:
+```bash
+docker compose --env-file .env.local up -d --build
+```
+
+После `/health` он открывает `http://localhost:8080`. Если `.env.local` уже существует, достаточно непосредственно выполнить эту Compose-команду. Web-порт по умолчанию привязан только к `127.0.0.1`.
+
+Default Compose запускает CPU embedding service с `EMBEDDING_WARMUP=true`: на пустом `model_cache` он загружает BGE-M3, и `/ready` остаётся `503` до фактической загрузки модели. Первый запуск может занять десятки минут; `EMBEDDING_HEALTH_START_PERIOD` по умолчанию равен `30m`. API и Setup Wizard запускаются сразу после старта embedding-процесса, а UI честно показывает `model_loading`; ingestion/indexing workers ждут реальную embedding readiness. Поэтому cold warmup не блокирует первичную настройку и не выдаётся за готовность.
+
+На macOS generation server остаётся нативным и доступен контейнерам по `host.docker.internal:11434`. Для заранее запущенного нативного embedding endpoint используйте `-f compose.native-models.yml`; dev-порты БД/Redis включаются только через `-f compose.dev.yml`.
+
+При первой загрузке Web UI открывает Setup Wizard: создайте tenant/admin, зарегистрируйте и проверьте generation/embedding/optional reranker, при необходимости настройте Telegram и проверьте сервисы. Progress хранится в PostgreSQL и продолжается после reload. После атомарного создания первого администратора bootstrap endpoint закрывается навсегда. `make bootstrap-admin` остаётся только аварийным fallback:
 
 ```bash
 read -rs BOOTSTRAP_ADMIN_PASSWORD; echo; export BOOTSTRAP_ADMIN_PASSWORD
@@ -31,11 +39,13 @@ TENANT_SLUG=acme TENANT_NAME=Acme ADMIN_USERNAME=admin ADMIN_DISPLAY_NAME=Admini
 unset BOOTSTRAP_ADMIN_PASSWORD
 ```
 
-Откройте `http://localhost:8080`, войдите, создайте knowledge base, source, выполните refresh/indexing и задайте вопрос. Полный проверочный путь: [owner acceptance](docs/testing/owner-acceptance.md).
+Основной локальный путь не требует terminal bootstrap или ручного редактирования model/Telegram env. После Wizard создайте knowledge base, source, выполните refresh/indexing и задайте вопрос. Полный проверочный путь: [owner acceptance](docs/testing/owner-acceptance.md).
 
 ## Конфигурация и secrets
 
-`.env.example` содержит безопасные local defaults; `.env.production.example` — fail-closed production template. Обязательны PostgreSQL/Redis URLs, стойкий `JWT_SECRET`, HTTPS CORS origin, secure cookies и self-hosted model endpoints. Connector/API/model/S3/Telegram secrets передаются через environment, Docker/Kubernetes secrets или `CredentialResolver`; не сохраняются в Git, UI, audit и обычных logs. `AUTH_DISABLED=true` разрешён только в `dev/test`.
+`.env.example` содержит безопасные local defaults; `.env.production.example` — fail-closed production template. Local dev автоматически создаёт Fernet master key с mode `0600` в отдельном persistent volume; credential payloads хранятся в PostgreSQL только зашифрованными. Production Compose монтирует master key из защищённого файла как Docker Secret; Kubernetes передаёт его из Secret/внешнего provider. Сам ключ не хранится в БД. UI возвращает только opaque reference, mask, type и key version, поддерживает rotation без rebuild. Connector/model/Telegram services разрешают secret только по tenant-bound reference. `AUTH_DISABLED=true` разрешён только в `dev/test`.
+
+В production first-run setup выключен по умолчанию. Для ограниченного bootstrap-окна platform administrator монтирует стойкий token как Docker/Kubernetes Secret (`SETUP_BOOTSTRAP_TOKEN_FILE` внутри API), открывает HTTPS UI, создаёт администратора и затем отключает bootstrap secret. OpenAPI/Redoc скрыты в production.
 
 Ключевые model variables: `MODEL_API_BASE_URL`, `GENERATION_MODEL`, `MODEL_API_TOKEN`, `EMBEDDING_API_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_TOKEN`, optional `RERANKER_API_BASE_URL`. Local generator ожидает OpenAI-compatible `/v1/chat/completions`, embedding service — `/v1/embeddings`.
 
@@ -43,7 +53,7 @@ unset BOOTSTRAP_ADMIN_PASSWORD
 
 - Web UI: chat, resumable SSE, history/citations/feedback и tenant admin operations.
 - HTTP: `/ask`, `/ask/stream`, `/v1/inference-jobs/**`, `/v1/conversations/**`; OpenAPI — `/docs`.
-- Telegram: создайте API key со scopes `inference:read,inference:write`, передайте как `RAG_API_KEY`; бот вызывает API и не получает DB/model credentials.
+- Telegram: в Admin UI создайте token/API-key credential references и включите bot. Процесс постоянно работает в безопасном idle state и применяет новую config version без rebuild.
 - Public: `/health`; sanitized `/ready`. `/metrics` и `/admin/runtime` должны быть доступны только из trusted network/reverse proxy; runtime endpoint дополнительно admin-only.
 
 ## Разработка и тестирование
@@ -70,7 +80,7 @@ Standard tests используют fake deterministic HTTP models/site/Git и �
 5. **Подготовьте PostgreSQL/Redis.** Создайте отдельную БД и least-privilege application user, включите `vector`, TLS и bounded pool. Выполните migrations отдельным one-shot job. Для Redis включите auth/TLS, AOF/RDB по требованиям, `noeviction`; Streams имеют bounded maxlen, а durable state остаётся в PostgreSQL. Neon demo JDBC source не является готовым production application DB profile.
 6. **Подготовьте модельное железо.** Заранее загрузите и проверьте Qwen2.5-Coder-7B и BGE-M3 на CPU, Apple MPS или NVIDIA CUDA host. Настройте OpenAI-compatible endpoints, health/readiness, token, concurrency/memory limits. API не скачивает weights. При outage readiness деградирует, новые jobs ограниченно retry и затем уходят в durable failed/DLQ state.
 7. **Заполните production configuration.** Скопируйте `.env.production.example` в защищённое secret/config хранилище, замените все placeholders, установите `APP_ENV=production`, `AUTH_DISABLED=false`, HTTPS origins и service URLs. До запуска выполните `poetry run python -m app.state.validate_config` с этим окружением, затем `docker compose --env-file <protected-file> config --quiet` или `helm template`; preflight выводит только имена ошибочных полей и приложение fail closed на слабом JWT, insecure cookie/CORS, disabled auth и небезопасные DB/Redis/model endpoints.
-8. **Single host.** Получите проверенный release/tag, задайте `*_IMAGE` как immutable `repository@sha256:digest`, выполните `pull` и запускайте с `--no-build`. Создайте backup/model-cache volumes, установите secrets, запустите DB/Redis, затем one-shot migration job, model services и application services. Создайте первого tenant/admin через bootstrap command. Проверьте `/health`, `/ready`, Web UI, затем Website/Git ingestion → indexing → grounded chat и optional Telegram. Установите restart policy и host monitoring. Полные команды — в [single-host runbook](docs/deployment/single-host.md).
+8. **Single host.** Получите проверенный release/tag, задайте `*_IMAGE` как immutable `repository@sha256:digest`, выполните `pull` и запускайте с `--no-build` и `compose.production.yml`. Создайте backup/model-cache volumes, установите secrets, запустите DB/Redis, затем one-shot migration job, model services и application services. Откройте ограниченное bootstrap-окно через файл Docker Secret и создайте первого tenant/admin в HTTPS UI; CLI остаётся incident fallback. Проверьте `/health`, `/ready`, Web UI, затем Website/Git ingestion → indexing → grounded chat и optional Telegram. Установите restart policy и host monitoring. Полные команды — в [single-host runbook](docs/deployment/single-host.md).
 9. **Kubernetes.** Создайте namespace, Secrets/ExternalSecrets и production values; проверьте Helm render. Запустите migration Job до Deployments, настройте Ingress/TLS/PVC, probes, resources, HPA/PDB и NetworkPolicies. Проверьте rollout/smoke; rollback выполняйте `helm rollback`, учитывая совместимость schema. См. [Kubernetes runbook](docs/deployment/kubernetes.md).
 10. **Backup/DR.** Делайте регулярный encrypted PostgreSQL backup и restore drills; сохраняйте manifests/configuration, но не считайте Redis backup источником истины. Active source/index versions восстанавливаются из PostgreSQL/content blobs; model cache можно загрузить заново с проверкой SHA-256. Владелец задаёт RPO/RTO. См. [backup/restore](docs/operations/backup-restore.md).
 11. **Monitoring.** Подключите `/metrics` к Prometheus и OTLP к collector. Импортируйте `deploy/observability/grafana-dashboard.json` и alerts. Контролируйте readiness, queue age/DLQ, failures, DB pool/disk и model outage; задайте log retention и регулярно проверяйте redaction prompts, retrieved content, auth headers и credentials.

@@ -18,6 +18,11 @@ embeddingImage:
   tag: "1.0.0"
   digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   pullPolicy: IfNotPresent
+botImage:
+  repository: ghcr.io/example/rag-assistant-bot
+  tag: "1.0.0"
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  pullPolicy: IfNotPresent
 config:
   appEnv: production
   modelApiBaseUrl: https://generation.internal.example.invalid/v1

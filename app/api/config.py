@@ -1,5 +1,6 @@
 import ipaddress
 import tempfile
+from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
@@ -137,6 +138,12 @@ class Settings(BaseSettings):
     inference_rate_limit_per_minute: int = 60
     admin_mutation_rate_limit_per_minute: int = 30
     worker_lease_sec: int = 300
+    setup_bootstrap_token: str | None = None
+    setup_bootstrap_token_file: str | None = None
+    secret_store_provider: Literal["encrypted_db"] = "encrypted_db"
+    secret_store_master_key: str | None = None
+    secret_store_master_key_file: str | None = None
+    secret_store_key_file: str = ".runtime/secrets/master.key"
 
     stream_edit_interval_sec: float = 1.0
     stream_min_chars_delta: int = 40
@@ -182,6 +189,27 @@ class Settings(BaseSettings):
 
             if self.auth_disabled:
                 raise ValueError("AUTH_DISABLED is forbidden in production.")
+            if not (self.secret_store_master_key or self.secret_store_master_key_file):
+                raise ValueError("A secret-store master key source is required in production.")
+            if self.setup_bootstrap_token and (
+                len(self.setup_bootstrap_token) < 32
+                or any(
+                    marker in self.setup_bootstrap_token.lower() for marker in placeholder_markers
+                )
+            ):
+                raise ValueError("SETUP_BOOTSTRAP_TOKEN must be a strong secret when enabled.")
+            if self.setup_bootstrap_token_file:
+                try:
+                    file_token = Path(self.setup_bootstrap_token_file).read_text().strip()
+                except OSError as exc:
+                    raise ValueError("SETUP_BOOTSTRAP_TOKEN_FILE is unavailable.") from exc
+                if file_token and (
+                    len(file_token) < 32
+                    or any(marker in file_token.lower() for marker in placeholder_markers)
+                ):
+                    raise ValueError(
+                        "SETUP_BOOTSTRAP_TOKEN_FILE must contain a strong secret when enabled."
+                    )
             if not self.auth_cookie_secure:
                 raise ValueError("AUTH_COOKIE_SECURE must be true in production.")
             if self.auth_cookie_samesite == "none" and not self.auth_cookie_secure:

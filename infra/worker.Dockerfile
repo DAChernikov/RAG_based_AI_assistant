@@ -13,6 +13,8 @@ ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
-RUN useradd --no-create-home --uid 10002 worker
-USER 10002
+RUN useradd --no-create-home --uid 10001 worker \
+    && mkdir -p /var/lib/rag-secrets \
+    && chown 10001:10001 /var/lib/rag-secrets
+USER 10001
 CMD ["python", "-m", "app.worker.main"]

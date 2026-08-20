@@ -12,6 +12,7 @@
 - Multi-label routing, grounded citations and sqlglot AST/schema/read-only EXPLAIN pipeline.
 - Scheduler, retention, model/prompt registries, evaluation and observability.
 - React/TypeScript Web UI, hardened Compose, Helm artifacts, CI/security/SBOM gates and runbooks.
+- Atomic first-run Setup Wizard, encrypted credential references and UI-managed model/Telegram configuration.
 
 The active release surface and limitations are documented in `README.md`; capabilities are not inferred from old iteration documents.
 

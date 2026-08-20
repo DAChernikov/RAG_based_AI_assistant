@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from app.api.config import Settings
@@ -20,6 +21,7 @@ def production(**overrides):
         "model_api_base_url": "https://model.internal.test/v1",
         "embedding_api_base_url": "https://embedding.internal.test/v1",
         "postgres_sslmode": "verify-full",
+        "secret_store_master_key": Fernet.generate_key().decode(),
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -51,6 +53,18 @@ def test_production_cookie_and_secret_contracts_fail_closed():
         production(auth_cookie_secure=False, auth_cookie_samesite="none")
     with pytest.raises(ValidationError):
         production(jwt_secret="CHANGE-ME")
+
+
+def test_production_setup_token_file_is_optional_but_must_be_strong_when_populated(tmp_path):
+    disabled = tmp_path / "disabled"
+    disabled.write_text("")
+    assert production(setup_bootstrap_token_file=str(disabled))
+    disabled.write_text("weak")
+    with pytest.raises(ValidationError, match="SETUP_BOOTSTRAP_TOKEN_FILE"):
+        production(setup_bootstrap_token_file=str(disabled))
+    disabled.unlink()
+    with pytest.raises(ValidationError, match="unavailable"):
+        production(setup_bootstrap_token_file=str(disabled))
 
 
 def test_production_allows_only_explicit_internal_plain_http_model_host():

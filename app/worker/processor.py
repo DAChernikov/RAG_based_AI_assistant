@@ -17,12 +17,16 @@ from app.operations.runtime_registry import (
 )
 from app.retrieval.contracts import RetrievalFilters
 from app.retrieval.hybrid import HybridRetrievalRepository, HybridRetriever
+from app.secrets.store import EncryptedDatabaseSecretStore, load_master_key
 from app.sql.explain import SQLExplainContext
 
 
 class InferenceProcessor:
     def __init__(self, session_factory):
-        self.registry = RuntimeRegistry(OperationsRepository(session_factory))
+        self.registry = RuntimeRegistry(
+            OperationsRepository(session_factory),
+            EncryptedDatabaseSecretStore(session_factory, load_master_key()),
+        )
         self.embeddings = RegistryEmbeddingGateway(self.registry)
         self.retriever = HybridRetriever(
             HybridRetrievalRepository(session_factory), self.embeddings

@@ -1,0 +1,36 @@
+services:
+  migrate:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+    secrets: [secret_store_master_key]
+  api:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+      SETUP_BOOTSTRAP_TOKEN_FILE: /run/secrets/setup_bootstrap_token
+    secrets: [secret_store_master_key, setup_bootstrap_token]
+  inference-worker:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+    secrets: [secret_store_master_key]
+  ingestion-worker:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+    secrets: [secret_store_master_key]
+  indexing-worker:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+    secrets: [secret_store_master_key]
+  scheduler:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+    secrets: [secret_store_master_key]
+  bot:
+    environment:
+      SECRET_STORE_MASTER_KEY_FILE: /run/secrets/secret_store_master_key
+    secrets: [secret_store_master_key]
+
+secrets:
+  secret_store_master_key:
+    file: ${SECRET_STORE_MASTER_KEY_FILE_SOURCE:?Set a protected master-key file path}
+  setup_bootstrap_token:
+    file: ${SETUP_BOOTSTRAP_TOKEN_FILE_SOURCE:-/dev/null}

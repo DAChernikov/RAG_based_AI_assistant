@@ -9,22 +9,24 @@ This runbook assumes one hardened Linux host, Docker Engine/Compose, a DNS name 
 3. Point DNS to the host. Terminate TLS with Caddy/Nginx/Traefik, redirect HTTP to HTTPS, automate ACME renewal and proxy only Web/API traffic. Set the exact HTTPS origin and trusted proxy CIDRs.
 4. Copy `.env.production.example` to a root-readable secret file outside the checkout. Replace every placeholder. Prefer Docker secrets for passwords/tokens. Validate it before contacting any dependency with `docker compose --env-file /run/secrets/rag.env run --rm --no-deps api python -m app.state.validate_config`. Validation reports field names only, never values.
 5. Create a PostgreSQL 16 database/user with only application-schema privileges and `CREATE EXTENSION vector`; require TLS. Configure Redis 7 auth/TLS, AOF, `noeviction` and memory alerts.
-6. Preload Qwen and BGE-M3 weights into model-service storage and verify origin/checksum. Default Compose runs `EMBEDDING_WARMUP=true`; if its persistent cache is empty, the embedding container downloads/loads BGE-M3 during its own startup while `/ready` remains unavailable. The API itself never downloads model weights and waits for successful embedding readiness. For external model services, start them first and test `/health`, `/ready`, `/v1/models` or `/v1/embeddings`.
+6. Preload Qwen and BGE-M3 weights into model-service storage and verify origin/checksum. Default Compose runs `EMBEDDING_WARMUP=true`; if its persistent cache is empty, the embedding container downloads/loads BGE-M3 during its own startup while `/ready` remains unavailable. API/Web start so an operator sees `model_loading`; indexing/inference readiness still waits for the model. The API never downloads weights. For external model services, start them first and test `/health`, `/ready`, `/v1/models` or `/v1/embeddings`.
 
 ## Deploy
 
 ```bash
 git fetch --tags
 git checkout <reviewed-release-tag>
-docker compose --env-file /run/secrets/rag.env config --quiet
-docker compose --env-file /run/secrets/rag.env pull
-docker compose --env-file /run/secrets/rag.env up -d postgres redis
-docker compose --env-file /run/secrets/rag.env run --rm --no-deps migrate
-docker compose --env-file /run/secrets/rag.env up -d --no-build embedding-service api inference-worker ingestion-worker indexing-worker scheduler web
-docker compose --env-file /run/secrets/rag.env ps
+docker compose --env-file /run/secrets/rag.env -f docker-compose.yml -f compose.production.yml config --quiet
+docker compose --env-file /run/secrets/rag.env -f docker-compose.yml -f compose.production.yml pull
+docker compose --env-file /run/secrets/rag.env -f docker-compose.yml -f compose.production.yml up -d postgres redis
+docker compose --env-file /run/secrets/rag.env -f docker-compose.yml -f compose.production.yml run --rm --no-deps migrate
+docker compose --env-file /run/secrets/rag.env -f docker-compose.yml -f compose.production.yml up -d --no-build embedding-service api inference-worker ingestion-worker indexing-worker scheduler bot web
+docker compose --env-file /run/secrets/rag.env -f docker-compose.yml -f compose.production.yml ps
 ```
 
-Set every `*_IMAGE` variable to a reviewed immutable `repository@sha256:digest`; `pull` plus `--no-build` prevents production from building a mutable checkout. If PostgreSQL/Redis/models are external, use a private override file that removes local services and injects TLS URLs. Bootstrap admin inside the running API container without putting the password value on the command line:
+Set every `*_IMAGE` variable to a reviewed immutable `repository@sha256:digest`; `pull` plus `--no-build` prevents production from building a mutable checkout. If PostgreSQL/Redis/models are external, use a private override file that removes local services and injects TLS URLs. Point `SECRET_STORE_MASTER_KEY_FILE_SOURCE` at a protected Fernet key file and include `-f compose.production.yml`; Compose mounts it read-only as a Docker Secret. Production Setup Wizard is disabled while `SETUP_BOOTSTRAP_TOKEN_FILE_SOURCE=/dev/null`. To open one bootstrap window, point that variable at a protected strong-token file, recreate API, open the HTTPS UI, create the first tenant/admin, restore `/dev/null`, and recreate API. The endpoint remains closed after completion.
+
+If Web bootstrap is unavailable during incident recovery, use the fallback inside the running API container without putting the password value on the command line:
 
 ```bash
 read -rs BOOTSTRAP_ADMIN_PASSWORD; echo; export BOOTSTRAP_ADMIN_PASSWORD

@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -147,3 +148,57 @@ class AnswerFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class SystemSetup(Base):
+    """Singleton bootstrap/onboarding state; it remains closed after first completion."""
+
+    __tablename__ = "system_setup"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL")
+    )
+    administrator_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    current_step: Mapped[str] = mapped_column(String(30), nullable=False, default="administrator")
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    bootstrap_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class CredentialSecret(TimestampMixin, Base):
+    __tablename__ = "credential_secrets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "reference", name="uq_credential_secrets_tenant_ref"),
+        Index("ix_credential_secrets_tenant_updated", "tenant_id", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    masked_value: Mapped[str] = mapped_column(String(32), nullable=False, default="••••••••")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class TelegramConfiguration(TimestampMixin, Base):
+    __tablename__ = "telegram_configurations"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    token_credential_ref: Mapped[str | None] = mapped_column(String(255))
+    api_key_credential_ref: Mapped[str | None] = mapped_column(String(255))
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_test_status: Mapped[str | None] = mapped_column(String(30))
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

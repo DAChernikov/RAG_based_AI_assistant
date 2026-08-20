@@ -21,6 +21,9 @@ from app.api.routes import (
     jobs,
     knowledge,
     operations,
+    platform,
+    secrets,
+    setup,
     users,
 )
 from app.observability import configure_tracing, log_event, tracer
@@ -63,6 +66,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "indexing_queue": None,
         "embedding_client": None,
         "operations_repository": None,
+        "setup_repository": None,
+        "secret_store": None,
+        "runtime_registry": None,
     }
 
     try:
@@ -88,6 +94,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         operations_repository = OperationsRepository(session_factory)
         runtime["operations_repository"] = operations_repository
+        from app.secrets.store import EncryptedDatabaseSecretStore, load_master_key
+        from app.setup.repository import SetupRepository
+
+        runtime["setup_repository"] = SetupRepository(session_factory)
+        runtime["secret_store"] = EncryptedDatabaseSecretStore(
+            session_factory, load_master_key(settings)
+        )
         from app.embeddings.client import EmbeddingClient
         from app.indexing.redis_queue import RedisIndexingQueue
         from app.indexing.repository import IndexRepository
@@ -105,9 +118,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.operations.runtime_registry import RegistryEmbeddingGateway, RuntimeRegistry
         from app.retrieval.hybrid import HybridRetrievalRepository, HybridRetriever
 
+        runtime_registry = RuntimeRegistry(operations_repository, runtime["secret_store"])
+        runtime["runtime_registry"] = runtime_registry
         runtime["hybrid_retriever"] = HybridRetriever(
             HybridRetrievalRepository(session_factory),
-            RegistryEmbeddingGateway(RuntimeRegistry(operations_repository)),
+            RegistryEmbeddingGateway(runtime_registry),
         )
         indexing_queue = RedisIndexingQueue()
         await indexing_queue.ensure_group()
@@ -177,6 +192,9 @@ app = FastAPI(
     title="RAG Based AI Assistant API",
     version="0.5.0",
     lifespan=lifespan,
+    docs_url=None if settings.app_env == "production" else "/docs",
+    redoc_url=None if settings.app_env == "production" else "/redoc",
+    openapi_url=None if settings.app_env == "production" else "/openapi.json",
 )
 
 if settings.cors_origins:
@@ -185,7 +203,13 @@ if settings.cors_origins:
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-Token"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "X-CSRF-Token",
+            "X-Setup-Token",
+        ],
     )
 
 
@@ -212,6 +236,8 @@ async def correlation_middleware(request: Request, call_next):
         request.url.path.startswith("/ask") or request.url.path.startswith("/v1/inference-jobs")
     ):
         category, limit = "inference", settings.inference_rate_limit_per_minute
+    elif request.method == "POST" and request.url.path == "/v1/setup/bootstrap":
+        category, limit = "setup", settings.login_rate_limit_attempts
     elif request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith(
         "/v1/admin"
     ):
@@ -219,7 +245,12 @@ async def correlation_middleware(request: Request, call_next):
     runtime = getattr(request.app.state, "runtime", {})
     redis = runtime.get("auth_redis")
     if category and redis is not None:
-        credential = request.headers.get("authorization") or request.headers.get("x-api-key", "")
+        credential = (
+            request.headers.get("authorization")
+            or request.headers.get("x-api-key")
+            or request.headers.get("x-setup-token")
+            or (request.client.host if request.client else "unknown")
+        )
         fingerprint = hashlib.sha256(credential.encode()).hexdigest()[:24]
         try:
             count = await redis.eval(
@@ -248,6 +279,7 @@ async def correlation_middleware(request: Request, call_next):
 
 
 app.include_router(health.router)
+app.include_router(setup.router)
 app.include_router(auth.router)
 app.include_router(ask.router)
 app.include_router(jobs.router)
@@ -257,5 +289,7 @@ app.include_router(users.router)
 app.include_router(catalog.router)
 app.include_router(indexing.router)
 app.include_router(operations.router)
+app.include_router(platform.router)
+app.include_router(secrets.router)
 app.include_router(admin.router)
 app.mount("/metrics", make_asgi_app())

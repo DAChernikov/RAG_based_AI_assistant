@@ -15,7 +15,9 @@ COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
 COPY alembic.ini ./
 COPY migrations ./migrations
-RUN useradd --no-create-home --uid 10001 appuser
+RUN useradd --no-create-home --uid 10001 appuser \
+    && mkdir -p /var/lib/rag-secrets \
+    && chown 10001:10001 /var/lib/rag-secrets
 USER 10001
 EXPOSE 8000
 CMD ["sh", "-c", "exec python -m uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"${TRUSTED_PROXY_CIDRS:-127.0.0.1}\""]

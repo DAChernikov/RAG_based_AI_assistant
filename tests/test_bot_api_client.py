@@ -58,9 +58,8 @@ class Client:
 @pytest.mark.asyncio
 async def test_telegram_api_client_request_stream_and_ready(monkeypatch):
     transport = Client()
-    client = APIClient()
+    client = APIClient(api_key="scoped-key")
     monkeypatch.setattr(client, "_client", lambda _timeout: transport)
-    monkeypatch.setattr("app.bot.api_client.bot_settings.api_key", "scoped-key")
     result = await client.ask("question", mode="rag", top_k=3)
     assert result["answer"] == "ok"
     request = transport.requests[0]

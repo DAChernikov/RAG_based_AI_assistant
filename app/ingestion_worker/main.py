@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.api.config import settings
 from app.catalog.repository import CatalogRepository, LeaseLostError
 from app.concurrency import BoundedThreadAdapter
-from app.connectors.base import EnvironmentCredentialResolver, TransientConnectorError
+from app.connectors.base import TransientConnectorError
 from app.connectors.git import GitConnector
 from app.connectors.jdbc import JDBCMetadataConnector
 from app.connectors.jdbc_registry import ManagedDriverRegistry
@@ -31,6 +31,7 @@ class IngestionWorker:
         worker_id: str | None = None,
         auto_indexer=None,
         blocking_io=None,
+        credential_resolver=None,
     ):
         self.repository = repository
         self.queue = queue
@@ -40,6 +41,7 @@ class IngestionWorker:
         self.auto_indexer = auto_indexer
         self.blocking_io = blocking_io or BoundedThreadAdapter(max_workers=4, max_pending=8)
         self._owns_blocking_io = blocking_io is None
+        self.credential_resolver = credential_resolver
 
     async def _event(self, contract, event_type: str, stage: str | None = None) -> None:
         await self.queue.publish_event(
@@ -102,6 +104,11 @@ class IngestionWorker:
         async def emit(event_type, stage):
             await self._event(contract, event_type, stage)
 
+        tenant_token = (
+            self.credential_resolver.bind(contract.tenant_id)
+            if self.credential_resolver is not None
+            else None
+        )
         try:
             await self.pipeline.execute(contract, emit, lease_token=lease_token)
             completed = await self.blocking_io.call(
@@ -137,6 +144,8 @@ class IngestionWorker:
         except Exception:
             await self._fail(message_id, contract, lease_token, "ingestion_failed")
         finally:
+            if tenant_token is not None:
+                self.credential_resolver.reset(tenant_token)
             lease_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await lease_task
@@ -206,7 +215,12 @@ async def async_main() -> None:
     engine = create_database_engine()
     session_factory = create_session_factory(engine)
     repository = CatalogRepository(session_factory)
-    resolver = EnvironmentCredentialResolver()
+    from app.secrets.resolver import TenantAwareStoredCredentialResolver
+    from app.secrets.store import EncryptedDatabaseSecretStore, load_master_key
+
+    resolver = TenantAwareStoredCredentialResolver(
+        EncryptedDatabaseSecretStore(session_factory, load_master_key())
+    )
     pipeline = IngestionPipeline(
         repository,
         WebsiteConnector(resolver),
@@ -251,7 +265,13 @@ async def async_main() -> None:
                     )
                 )
 
-    worker = IngestionWorker(repository, queue, pipeline, auto_indexer=auto_index)
+    worker = IngestionWorker(
+        repository,
+        queue,
+        pipeline,
+        auto_indexer=auto_index,
+        credential_resolver=resolver,
+    )
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signal_name, worker.stop_event.set)

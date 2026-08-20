@@ -25,6 +25,8 @@ x-app-env: &app-env
   RERANKER_API_TOKEN: ${RERANKER_API_TOKEN:-}
   SQL_ENABLE_EXPLAIN_VALIDATION: ${SQL_ENABLE_EXPLAIN_VALIDATION:-false}
   SQL_EXPLAIN_TIMEOUT_SEC: ${SQL_EXPLAIN_TIMEOUT_SEC:-10}
+  SECRET_STORE_PROVIDER: encrypted_db
+  SECRET_STORE_KEY_FILE: /var/lib/rag-secrets/master.key
 
 x-service-security: &service-security
   read_only: true
@@ -81,7 +83,7 @@ services:
       EMBEDDING_MODEL_VERSION: ${EMBEDDING_MODEL_VERSION:-bge-m3/1}
       EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
       EMBEDDING_CONCURRENCY: ${EMBEDDING_CONCURRENCY:-1}
-      # API waits for /ready, so the container embedding profile must initiate loading itself.
+      # Loading starts independently; UI reports model_loading until /ready succeeds.
       EMBEDDING_WARMUP: ${EMBEDDING_WARMUP:-true}
       HF_HOME: /models/huggingface
     volumes: [model_cache:/models]
@@ -101,6 +103,7 @@ services:
     build: { context: ., dockerfile: infra/api.Dockerfile }
     environment: *app-env
     extra_hosts: [host.docker.internal:host-gateway]
+    volumes: [secret_keys:/var/lib/rag-secrets]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 10s
@@ -109,7 +112,7 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
-      embedding-service: { condition: service_healthy }
+      embedding-service: { condition: service_started }
     <<: *service-security
     mem_limit: 768m
 
@@ -118,6 +121,7 @@ services:
     build: { context: ., dockerfile: infra/worker.Dockerfile }
     environment: { <<: *app-env, WORKER_ID: "${WORKER_ID:-inference-worker-1}" }
     extra_hosts: [host.docker.internal:host-gateway]
+    volumes: [secret_keys:/var/lib/rag-secrets]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -136,6 +140,7 @@ services:
     image: ${INGESTION_IMAGE:-rag-assistant-ingestion:local}
     build: { context: ., dockerfile: infra/ingestion-worker.Dockerfile }
     environment: { <<: *app-env, INGESTION_WORKER_ID: "${INGESTION_WORKER_ID:-ingestion-worker-1}" }
+    volumes: [secret_keys:/var/lib/rag-secrets]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -154,6 +159,7 @@ services:
     build: { context: ., dockerfile: infra/worker.Dockerfile }
     command: [python, -m, app.indexing_worker.main]
     environment: { <<: *app-env, INDEXING_WORKER_ID: "${INDEXING_WORKER_ID:-indexing-worker-1}" }
+    volumes: [secret_keys:/var/lib/rag-secrets]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -188,7 +194,7 @@ services:
   web:
     image: ${WEB_IMAGE:-rag-assistant-web:local}
     build: { context: ., dockerfile: infra/web.Dockerfile }
-    ports: ["${WEB_PORT:-8080}:8080"]
+    ports: ["${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:8080"]
     depends_on: { api: { condition: service_healthy } }
     healthcheck:
       test: [CMD, wget, -qO-, http://127.0.0.1:8080/health]
@@ -203,16 +209,17 @@ services:
     image: ${BOT_IMAGE:-rag-assistant-bot:local}
     build: { context: ., dockerfile: infra/bot.Dockerfile }
     environment:
+      <<: *app-env
       API_BASE_URL: http://api:8000
-      API_KEY: ${TELEGRAM_API_KEY:-}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      BOT_CONFIG_RELOAD_INTERVAL_SEC: ${BOT_CONFIG_RELOAD_INTERVAL_SEC:-5}
+    volumes: [secret_keys:/var/lib/rag-secrets]
     depends_on: { api: { condition: service_healthy } }
-    profiles: [telegram]
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://api:8000/ready', timeout=2)"]
-      interval: 30s
+      test: [CMD, python, -m, app.worker_healthcheck, bot, --readiness]
+      interval: 15s
       timeout: 3s
       retries: 5
+      start_period: 20s
     <<: *service-security
     mem_limit: 256m
 
@@ -227,3 +234,4 @@ volumes:
   redis_data:
   model_cache:
   ollama_data:
+  secret_keys:

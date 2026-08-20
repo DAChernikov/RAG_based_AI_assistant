@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from app.api.config import settings
 from app.api.services.llm_service import OpenAICompatibleLLMService
 from app.embeddings.client import EmbeddingClient
 from app.operations.repository import OperationsRepository
 from app.retrieval.reranker import RerankerClient
+from app.secrets.store import SecretStore, SecretStoreError
 
 
 class RuntimeConfigurationError(RuntimeError):
@@ -23,6 +25,7 @@ class ResolvedModel:
     endpoint_ref: str
     credential_ref: str | None
     capabilities: dict
+    tenant_id: uuid.UUID = uuid.UUID(int=0)
 
 
 @dataclass(frozen=True)
@@ -40,8 +43,9 @@ class RuntimeRegistry:
     never contain bearer tokens or arbitrary runtime URLs.
     """
 
-    def __init__(self, repository: OperationsRepository):
+    def __init__(self, repository: OperationsRepository, secret_store: SecretStore | None = None):
         self.repository = repository
+        self.secret_store = secret_store
 
     def model(self, tenant_id: uuid.UUID, role: str) -> ResolvedModel:
         row = self.repository.resolve_active_model(tenant_id, role)
@@ -55,6 +59,7 @@ class RuntimeRegistry:
             endpoint_ref=row.endpoint_ref,
             credential_ref=row.credential_ref,
             capabilities=row.capabilities or {},
+            tenant_id=tenant_id,
         )
 
     def prompt(self, tenant_id: uuid.UUID, name: str) -> ResolvedPrompt:
@@ -63,8 +68,7 @@ class RuntimeRegistry:
             raise RuntimeConfigurationError(f"No active {name} prompt is configured.")
         return ResolvedPrompt(row.id, row.name, row.version, row.template)
 
-    @staticmethod
-    def endpoint(model: ResolvedModel) -> tuple[str, str | None]:
+    def endpoint(self, model: ResolvedModel) -> tuple[str, str | None]:
         references = {
             "endpoint:generation": (settings.model_api_base_url, settings.model_api_token),
             "endpoint:embedding": (
@@ -76,21 +80,43 @@ class RuntimeRegistry:
                 settings.reranker_api_token,
             ),
         }
-        value = references.get(model.endpoint_ref)
+        configured_url = model.capabilities.get("base_url")
+        value: tuple[str | None, str | None] | None
+        if configured_url is not None:
+            if not isinstance(configured_url, str):
+                raise RuntimeConfigurationError("Model endpoint URL is invalid.")
+            parsed = urlsplit(configured_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+                raise RuntimeConfigurationError("Model endpoint URL is invalid.")
+            value = (configured_url.rstrip("/"), None)
+        else:
+            value = references.get(model.endpoint_ref)
         if value is None or not value[0]:
             raise RuntimeConfigurationError(
                 f"Endpoint reference for {model.role} is not configured."
             )
-        expected_credential = {
-            "endpoint:generation": "credential:generation",
-            "endpoint:embedding": "credential:embedding",
-            "endpoint:reranker": "credential:reranker",
-        }[model.endpoint_ref]
-        if model.credential_ref not in {None, expected_credential}:
-            raise RuntimeConfigurationError(
-                f"Credential reference for {model.role} is not allowlisted."
-            )
-        return value[0], value[1]
+        token = value[1]
+        if model.credential_ref:
+            if self.secret_store is None:
+                expected_credential = f"credential:{model.role}"
+                if model.credential_ref != expected_credential:
+                    raise RuntimeConfigurationError(
+                        f"Credential reference for {model.role} is not allowlisted."
+                    )
+            else:
+                try:
+                    payload = self.secret_store.resolve(model.tenant_id, model.credential_ref)
+                except SecretStoreError as exc:
+                    raise RuntimeConfigurationError(
+                        f"Credential reference for {model.role} is unavailable."
+                    ) from exc
+                resolved = payload.get("value")
+                if not isinstance(resolved, str) or not resolved:
+                    raise RuntimeConfigurationError(
+                        f"Credential reference for {model.role} has an invalid contract."
+                    )
+                token = resolved
+        return value[0], token
 
     def generation_client(self, model: ResolvedModel) -> OpenAICompatibleLLMService:
         endpoint, token = self.endpoint(model)
@@ -138,6 +164,7 @@ class RegistryEmbeddingGateway:
             row.endpoint_ref,
             row.credential_ref,
             row.capabilities or {},
+            row.tenant_id or uuid.UUID(int=0),
         )
 
     async def embed_for_model(

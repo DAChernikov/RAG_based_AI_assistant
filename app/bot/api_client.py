@@ -10,8 +10,9 @@ from app.bot.config import bot_settings
 
 
 class APIClient:
-    def __init__(self):
-        self.base_url = bot_settings.api_base_url.rstrip("/")
+    def __init__(self, *, api_key: str | None = None, base_url: str | None = None):
+        self.base_url = (base_url or bot_settings.api_base_url).rstrip("/")
+        self.api_key = api_key
         self.timeout = bot_settings.request_timeout
         self.stream_timeout = httpx.Timeout(
             connect=bot_settings.stream_connect_timeout,
@@ -22,7 +23,7 @@ class APIClient:
 
     @property
     def headers(self) -> dict[str, str]:
-        return {"X-API-Key": bot_settings.api_key} if bot_settings.api_key else {}
+        return {"X-API-Key": self.api_key} if self.api_key else {}
 
     def _client(self, timeout: float | httpx.Timeout) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=timeout, trust_env=False)

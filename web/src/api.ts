@@ -13,9 +13,13 @@ export type IngestionRun = { id: string; source_id: string; source_version_id: s
 export type IndexingRun = { id: string; knowledge_base_id: string; index_version_id: string; status: string; attempt_count: number; checkpoint: Record<string, unknown>; cancel_requested: boolean }
 export type IndexVersion = { id: string; knowledge_base_id: string; version_number: number; status: string; pinned: boolean; manifest: Record<string, unknown> }
 export type Schedule = { id: string; source_id: string; interval_seconds: number; is_enabled: boolean; next_run_at: string; last_run_at?: string }
-export type ModelDefinition = { id: string; role: 'generation' | 'embedding' | 'reranker'; model_id: string; version: string; endpoint_ref: string; capabilities: Record<string, unknown>; is_active: boolean }
+export type ModelDefinition = { id: string; role: 'generation' | 'embedding' | 'reranker'; model_id: string; version: string; endpoint_ref: string; base_url?: string; credential_ref?: string; capabilities: Record<string, unknown>; is_active: boolean }
 export type PromptTemplate = { id: string; name: string; version: string; checksum: string; is_active: boolean }
 export type AuditEvent = { id: string; actor_user_id?: string; action: string; resource_type?: string; resource_id?: string; outcome: string; correlation_id: string; created_at: string }
+export type SetupStatus = { required: boolean; setup_available: boolean; token_required: boolean; current_step: 'administrator' | 'models' | 'telegram' | 'readiness' | 'complete'; onboarding_complete: boolean; config_version: number }
+export type Credential = { id: string; reference: string; kind: string; masked_value: string; key_version: number; created_at: string; updated_at: string }
+export type SystemStatus = { status: 'ready' | 'degraded'; components: Record<string, string> }
+export type TelegramConfiguration = { enabled: boolean; token_credential_ref?: string; api_key_credential_ref?: string; config_version: number; last_test_status?: string }
 
 function cookie(name: string): string | undefined {
   return document.cookie.split('; ').find((row) => row.startsWith(`${name}=`))?.split('=')[1]
@@ -45,6 +49,18 @@ export class ApiClient {
     const tokens = await this.request<{ access_token: string }>('/v1/auth/login', {
       method: 'POST', body: JSON.stringify({ tenant_slug, username, password, use_cookie: true }),
     })
+    this.accessToken = tokens.access_token
+    return this.me()
+  }
+
+  setupStatus() { return this.request<SetupStatus>('/v1/setup/status', {}, false) }
+
+  async bootstrapSetup(payload: Record<string, string>, setupToken?: string): Promise<Principal> {
+    const headers: Record<string, string> = {}
+    if (setupToken) headers['X-Setup-Token'] = setupToken
+    const tokens = await this.request<{ access_token: string }>('/v1/setup/bootstrap', {
+      method: 'POST', headers, body: JSON.stringify(payload),
+    }, false)
     this.accessToken = tokens.access_token
     return this.me()
   }

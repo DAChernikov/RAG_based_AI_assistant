@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$project_dir"
+
+if [ ! -f .env.local ]; then
+  cp .env.example .env.local
+  chmod 600 .env.local
+  echo "Created .env.local from safe local-development defaults."
+fi
+
+docker compose --env-file .env.local up -d --build
+
+url="http://127.0.0.1:${WEB_PORT:-8080}"
+attempt=0
+until curl --fail --silent --show-error "$url/health" >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 120 ]; then
+    echo "The Web/API health endpoint did not become available. Run: docker compose --env-file .env.local ps" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+case "$(uname -s)" in
+  Darwin) open "$url" ;;
+  Linux) command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 || true ;;
+esac
+echo "Setup Wizard: $url"

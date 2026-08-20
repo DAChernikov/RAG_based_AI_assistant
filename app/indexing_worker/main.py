@@ -162,8 +162,14 @@ async def async_main() -> None:
     queue = RedisIndexingQueue()
     from app.operations.repository import OperationsRepository
     from app.operations.runtime_registry import RegistryEmbeddingGateway, RuntimeRegistry
+    from app.secrets.store import EncryptedDatabaseSecretStore, load_master_key
 
-    embeddings = RegistryEmbeddingGateway(RuntimeRegistry(OperationsRepository(session_factory)))
+    embeddings = RegistryEmbeddingGateway(
+        RuntimeRegistry(
+            OperationsRepository(session_factory),
+            EncryptedDatabaseSecretStore(session_factory, load_master_key()),
+        )
+    )
     worker = IndexingWorker(repository, queue, embeddings)
     loop = asyncio.get_running_loop()
     for name in (signal.SIGINT, signal.SIGTERM):

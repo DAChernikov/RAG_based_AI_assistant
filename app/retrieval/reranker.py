@@ -48,6 +48,18 @@ class RerankerClient:
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
             return documents[:top_k]
 
+    async def readiness(self) -> dict:
+        try:
+            response = await self.client.get(f"{self.base_url}/ready")
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "ready": bool(payload.get("ready") or payload.get("status") == "ready"),
+                "status": payload.get("status", "ready"),
+            }
+        except (httpx.HTTPError, TypeError, ValueError):
+            return {"ready": False, "status": "unavailable"}
+
     async def close(self) -> None:
         if self._owns_client and not self.client.is_closed:
             await self.client.aclose()

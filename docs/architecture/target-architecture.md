@@ -23,6 +23,8 @@ Browser / Telegram / HTTP client
 
 The modular monolith shares domain/application/repository contracts while API, Web, Telegram, workers, scheduler and model servers remain independently bounded processes.
 
+On an empty installation the Web UI enters an atomic first-run flow backed by PostgreSQL. It remains reachable while the embedding service is warming, without changing readiness semantics. Administrators then manage versioned model endpoints, encrypted connector/Telegram credential references and sanitized diagnostics. Local encryption keys live in a dedicated persistent volume; production keys come only from platform secret storage. The Web UI observes services but has no Docker socket or arbitrary process-control capability.
+
 ## Request path
 
 The API derives tenant/user from JWT or scoped API key, validates knowledge-base ownership, persists message/job and enqueues a versioned contract. A fenced worker builds a multi-label `RoutePlan`, executes documentation/code/schema branches in parallel against the active index, fuses results with RRF and optional reranking, then sends bounded untrusted context to the Model Gateway. SQL output is parsed with PostgreSQL sqlglot dialect, restricted to one SELECT/WITH SELECT, checked against active schema, limited, optionally safely explained and fully revalidated after bounded repair. SSE emits resumable structured events; answer, route, citations, prompt/model versions and feedback remain durable.

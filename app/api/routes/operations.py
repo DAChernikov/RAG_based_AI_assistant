@@ -6,11 +6,12 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 from app.api.dependencies import get_runtime_state, require_admin
 from app.api.routes.catalog import _audit
 from app.auth.security import Principal
+from app.concurrency import api_blocking_io
 
 router = APIRouter(prefix="/v1/admin", tags=["operations"])
 
@@ -34,7 +35,8 @@ class ModelInput(BaseModel):
     role: Literal["generation", "embedding", "reranker"]
     model_id: str = Field(min_length=1, max_length=255)
     version: str = Field(min_length=1, max_length=100)
-    endpoint_ref: str = Field(pattern=r"^endpoint:[A-Za-z0-9_.:/-]+$")
+    base_url: AnyHttpUrl | None = None
+    endpoint_ref: str | None = Field(default=None, pattern=r"^endpoint:[A-Za-z0-9_.:/-]+$")
     credential_ref: str | None = Field(default=None, pattern=r"^credential:[A-Za-z0-9_.:/-]+$")
     capabilities: dict = Field(default_factory=dict)
 
@@ -177,6 +179,8 @@ async def list_models(
             "model_id": row.model_id,
             "version": row.version,
             "endpoint_ref": row.endpoint_ref,
+            "base_url": (row.capabilities or {}).get("base_url"),
+            "credential_ref": row.credential_ref,
             "capabilities": row.capabilities,
             "is_active": row.is_active,
         }
@@ -191,13 +195,99 @@ async def create_model(
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
-    row = await runtime["catalog_service"].call(
-        runtime["operations_repository"].create_model,
-        principal.tenant_id,
-        payload.model_dump(),
-    )
+    capabilities = dict(payload.capabilities)
+    if payload.base_url is not None:
+        capabilities["base_url"] = str(payload.base_url).rstrip("/")
+    values = {
+        "role": payload.role,
+        "model_id": payload.model_id,
+        "version": payload.version,
+        "endpoint_ref": payload.endpoint_ref or f"endpoint:{payload.role}",
+        "credential_ref": payload.credential_ref,
+        "capabilities": capabilities,
+    }
+    try:
+        row = await runtime["catalog_service"].call(
+            runtime["operations_repository"].create_model,
+            principal.tenant_id,
+            values,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _audit(request, runtime, principal, "model.create", "model_definition", row.id)
     return {"id": row.id, "role": row.role, "model_id": row.model_id, "is_active": False}
+
+
+@router.post("/models/{model_id}/test")
+async def test_model(
+    model_id: uuid.UUID,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    row = await runtime["catalog_service"].call(
+        runtime["operations_repository"].get_model, model_id
+    )
+    if row is None or row.tenant_id != principal.tenant_id:
+        raise HTTPException(status_code=404, detail="Model definition was not found.")
+    resolved = (
+        runtime["runtime_registry"].model(principal.tenant_id, row.role) if row.is_active else None
+    )
+    if resolved is None:
+        from app.operations.runtime_registry import ResolvedModel
+
+        resolved = ResolvedModel(
+            row.id,
+            row.role,
+            row.model_id,
+            row.version,
+            row.endpoint_ref,
+            row.credential_ref,
+            row.capabilities or {},
+            principal.tenant_id,
+        )
+    try:
+        if row.role == "generation":
+            client = await api_blocking_io.call(
+                runtime["runtime_registry"].generation_client, resolved
+            )
+            try:
+                result = await client.readiness()
+            finally:
+                await client.aclose()
+        elif row.role == "embedding":
+            client = await api_blocking_io.call(
+                runtime["runtime_registry"].embedding_client, resolved
+            )
+            try:
+                result = await client.readiness()
+            finally:
+                await client.close()
+        else:
+            client = await api_blocking_io.call(
+                runtime["runtime_registry"].reranker_client, resolved
+            )
+            try:
+                result = await client.readiness()
+            finally:
+                await client.close()
+    except Exception as exc:
+        from app.operations.runtime_registry import RuntimeConfigurationError
+
+        if isinstance(exc, RuntimeConfigurationError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"status": "unavailable", "error": "Model endpoint is unavailable."}
+    state = result.get("status")
+    ready = bool(result.get("ready") or state == "ready")
+    status = (
+        "ready"
+        if ready
+        else "model_loading" if state in {"loading", "model_loading"} else "unavailable"
+    )
+    return {
+        "status": status,
+        "model_id": row.model_id,
+        "version": row.version,
+    }
 
 
 @router.post("/models/{model_id}/activate")

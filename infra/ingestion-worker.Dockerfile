@@ -12,6 +12,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git openssh-client && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
-RUN useradd --no-create-home --uid 10003 ingestion
-USER 10003
+RUN useradd --no-create-home --uid 10001 ingestion \
+    && mkdir -p /var/lib/rag-secrets \
+    && chown 10001:10001 /var/lib/rag-secrets
+USER 10001
 CMD ["python", "-m", "app.ingestion_worker.main"]

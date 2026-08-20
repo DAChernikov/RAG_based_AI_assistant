@@ -13,3 +13,5 @@ data:
   EMBEDDING_API_BASE_URL: {{ .Values.config.embeddingApiBaseUrl | quote }}
   MODEL_HTTP_ALLOWED_HOSTS: "rag-assistant-embedding"
   CORS_ALLOWED_ORIGINS: {{ .Values.config.corsAllowedOrigins | quote }}
+  API_BASE_URL: "http://rag-assistant-api:8000"
+  SECRET_STORE_PROVIDER: "encrypted_db"

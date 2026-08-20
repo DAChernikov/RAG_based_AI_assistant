@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, exists, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.state.models import (
@@ -33,6 +34,7 @@ from app.state.models import (
     SourceSchedule,
     SourceVersion,
     SourceVersionStatus,
+    TelegramConfiguration,
 )
 
 
@@ -44,6 +46,56 @@ def checksum(value: dict | str) -> str:
 class OperationsRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
+
+    def get_telegram_configuration(self, tenant_id: uuid.UUID):
+        with self.session_factory() as session:
+            return session.get(TelegramConfiguration, tenant_id)
+
+    def list_enabled_telegram_configurations(self):
+        with self.session_factory() as session:
+            return list(
+                session.scalars(
+                    select(TelegramConfiguration).where(TelegramConfiguration.is_enabled.is_(True))
+                )
+            )
+
+    def upsert_telegram_configuration(
+        self,
+        tenant_id: uuid.UUID,
+        *,
+        is_enabled: bool,
+        token_credential_ref: str | None,
+        api_key_credential_ref: str | None,
+    ):
+        with self.session_factory.begin() as session:
+            row = session.scalar(
+                select(TelegramConfiguration)
+                .where(TelegramConfiguration.tenant_id == tenant_id)
+                .with_for_update()
+            )
+            if row is None:
+                row = TelegramConfiguration(tenant_id=tenant_id, config_version=1)
+                session.add(row)
+            else:
+                row.config_version += 1
+            row.is_enabled = is_enabled
+            row.token_credential_ref = token_credential_ref
+            row.api_key_credential_ref = api_key_credential_ref
+            session.flush()
+            return row
+
+    def record_telegram_test(self, tenant_id: uuid.UUID, status: str):
+        with self.session_factory.begin() as session:
+            row = session.scalar(
+                select(TelegramConfiguration)
+                .where(TelegramConfiguration.tenant_id == tenant_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise LookupError("Telegram is not configured.")
+            row.last_test_status = status
+            row.last_tested_at = datetime.now(UTC)
+            return row
 
     def list_schedules(self, tenant_id: uuid.UUID, offset: int, limit: int):
         with self.session_factory() as session:
@@ -516,15 +568,42 @@ class OperationsRepository:
             )
 
     def create_model(self, tenant_id: uuid.UUID, values: dict):
-        with self.session_factory.begin() as session:
-            row = ModelDefinition(
-                tenant_id=tenant_id,
-                config_checksum=checksum(values),
-                **values,
+        expected_checksum = checksum(values)
+
+        def existing(session: Session):
+            return session.scalar(
+                select(ModelDefinition).where(
+                    ModelDefinition.tenant_id == tenant_id,
+                    ModelDefinition.role == values["role"],
+                    ModelDefinition.model_id == values["model_id"],
+                    ModelDefinition.version == values["version"],
+                )
             )
-            session.add(row)
-            session.flush()
-            return row
+
+        try:
+            with self.session_factory.begin() as session:
+                row = existing(session)
+                if row is not None:
+                    if row.config_checksum != expected_checksum:
+                        raise ValueError(
+                            "This model version already exists with different configuration."
+                        )
+                    return row
+                row = ModelDefinition(
+                    tenant_id=tenant_id,
+                    config_checksum=expected_checksum,
+                    **values,
+                )
+                session.add(row)
+                session.flush()
+                return row
+        except IntegrityError as exc:
+            # A concurrent first-run tab may have inserted the same immutable definition.
+            with self.session_factory() as session:
+                row = existing(session)
+                if row is not None and row.config_checksum == expected_checksum:
+                    return row
+            raise ValueError("Model version was created concurrently with other settings.") from exc
 
     def activate_model(self, tenant_id: uuid.UUID, model_id: uuid.UUID):
         with self.session_factory.begin() as session:

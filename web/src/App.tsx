@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { api, Citation, Conversation, KnowledgeBase, Principal } from './api'
 import { Admin } from './Admin'
+import { SetupWizard } from './SetupWizard'
+import type { SetupStatus } from './api'
 
 type Message = { role: 'user' | 'assistant'; text: string; citations?: Citation[]; details?: unknown; answerId?: string }
 
@@ -86,9 +88,12 @@ function Chat() {
 }
 
 export function App() {
-  const [principal, setPrincipal] = useState<Principal>(); const [page, setPage] = useState<'chat' | 'admin'>('chat'); const [checking, setChecking] = useState(true)
-  useEffect(() => { api.refresh().then((ok) => ok ? api.me().then(setPrincipal) : undefined).finally(() => setChecking(false)) }, [])
+  const [principal, setPrincipal] = useState<Principal>(); const [page, setPage] = useState<'chat' | 'admin'>('chat'); const [checking, setChecking] = useState(true); const [setup, setSetup] = useState<SetupStatus>()
+  useEffect(() => { api.setupStatus().then(setSetup).then(() => api.refresh()).then((ok) => ok ? api.me().then(setPrincipal) : undefined).finally(() => setChecking(false)) }, [])
   if (checking) return <main className="center">Проверяем сессию…</main>
+  if (setup?.required && !setup.setup_available) return <main className="login-shell"><section className="card login"><p className="eyebrow">SETUP LOCKED</p><h1>Первичная настройка отключена</h1><p className="muted">Platform administrator должен временно разрешить защищённый bootstrap через secret storage. После создания первого администратора этот вход закроется навсегда.</p></section></main>
+  if (setup?.required && setup.setup_available) return <SetupWizard initial={setup} principal={principal} onAuthenticated={setPrincipal} onComplete={() => { setSetup({ ...setup, onboarding_complete: true, current_step: 'complete' }); setPage('admin') }}/>
+  if (principal?.role === 'admin' && setup?.onboarding_complete === false) return <SetupWizard initial={setup} principal={principal} onAuthenticated={setPrincipal} onComplete={() => { setSetup({ ...setup, onboarding_complete: true, current_step: 'complete' }); setPage('admin') }}/>
   if (!principal) return <Login onLogin={setPrincipal}/>
-  return <div className="app"><aside><div><p className="brand">RAG<span>•</span></p><p className="muted">{principal.username}</p></div><nav><button className={page === 'chat' ? 'active' : 'secondary'} onClick={() => setPage('chat')}>Чат</button>{principal.role === 'admin' && <button className={page === 'admin' ? 'active' : 'secondary'} onClick={() => setPage('admin')}>Admin</button>}</nav><button className="secondary" onClick={() => api.logout().then(() => setPrincipal(undefined))}>Выйти</button></aside>{page === 'chat' ? <Chat/> : <Admin/>}</div>
+  return <div className="app"><aside><div><p className="brand">RAG<span>•</span></p><p className="muted">{principal.username}</p></div><nav><button className={page === 'chat' ? 'active' : 'secondary'} onClick={() => setPage('chat')}>Чат</button>{principal.role === 'admin' && <button className={page === 'admin' ? 'active' : 'secondary'} onClick={() => setPage('admin')}>Администрирование</button>}</nav><button className="secondary" onClick={() => api.logout().then(() => setPrincipal(undefined))}>Выйти</button></aside>{page === 'chat' ? <Chat/> : <Admin/>}</div>
 }

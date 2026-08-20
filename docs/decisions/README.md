@@ -11,3 +11,4 @@
 - ADR-009 — managed JDBC metadata connector
 - ADR-010 — final self-hosted runtime
 - ADR-011 — React Web UI and browser session model
+- ADR-012 — UI-first bootstrap and encrypted credential references

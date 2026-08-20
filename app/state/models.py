@@ -53,11 +53,14 @@ from app.state.models_indexing import (
 )
 from app.state.models_operations import (
     AnswerFeedback,
+    CredentialSecret,
     ModelDefinition,
     PromptTemplate,
     RetentionPolicy,
     ScheduleAttempt,
     SourceSchedule,
+    SystemSetup,
+    TelegramConfiguration,
 )
 
 __all__ = [
@@ -104,4 +107,7 @@ __all__ = [
     "ModelDefinition",
     "PromptTemplate",
     "AnswerFeedback",
+    "SystemSetup",
+    "CredentialSecret",
+    "TelegramConfiguration",
 ]

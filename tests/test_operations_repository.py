@@ -194,3 +194,24 @@ def test_model_registry_activation_is_atomic_per_role():
     repository.activate_model(tenant_id, second.id)
     active = [row for row in repository.list_models(tenant_id) if row.is_active]
     assert [row.id for row in active] == [second.id]
+
+
+def test_model_registry_create_is_idempotent_but_rejects_version_redefinition():
+    repository, _, (tenant_id, _, _, _) = context()
+    values = {
+        "role": "generation",
+        "model_id": "qwen",
+        "version": "1",
+        "endpoint_ref": "endpoint:generation",
+        "credential_ref": None,
+        "capabilities": {"base_url": "http://model.internal/v1"},
+    }
+    first = repository.create_model(tenant_id, values)
+    assert repository.create_model(tenant_id, values).id == first.id
+    changed = {**values, "capabilities": {"base_url": "http://other.internal/v1"}}
+    try:
+        repository.create_model(tenant_id, changed)
+    except ValueError as exc:
+        assert "different configuration" in str(exc)
+    else:
+        raise AssertionError("Immutable model version must not be overwritten.")
