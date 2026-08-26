@@ -192,11 +192,21 @@ export function App() {
     api.setupStatus().then(setSetup).then(() => api.refresh()).then((ok) => ok ? api.me().then(setPrincipal) : undefined).finally(() => setChecking(false))
   }, [])
   const logout = () => void api.logout().then(() => setPrincipal(undefined))
+  const completeSetup = () => {
+    setSetup((current) => current ? {
+      ...current,
+      required: false,
+      setup_available: false,
+      onboarding_complete: true,
+      current_step: 'complete',
+    } : current)
+    setPage('admin')
+  }
 
   if (checking) return <main className="center">Проверяем сессию…</main>
   if (setup?.required && !setup.setup_available) return <main className="login-shell"><section className="card login"><p className="eyebrow">SETUP LOCKED</p><h1>Первичная настройка отключена</h1><p className="muted">Platform administrator должен временно разрешить защищённый bootstrap через secret storage.</p></section></main>
-  if (setup?.required && setup.setup_available) return <SetupWizard initial={setup} principal={principal} onAuthenticated={setPrincipal} onComplete={() => { setSetup({ ...setup, onboarding_complete: true, current_step: 'complete' }); setPage('admin') }}/>
-  if (principal?.role === 'admin' && setup?.onboarding_complete === false) return <SetupWizard initial={setup} principal={principal} onAuthenticated={setPrincipal} onComplete={() => { setSetup({ ...setup, onboarding_complete: true, current_step: 'complete' }); setPage('admin') }}/>
+  if (setup?.required && setup.setup_available) return <SetupWizard initial={setup} principal={principal} onAuthenticated={setPrincipal} onComplete={completeSetup}/>
+  if (principal?.role === 'admin' && setup?.onboarding_complete === false) return <SetupWizard initial={setup} principal={principal} onAuthenticated={setPrincipal} onComplete={completeSetup}/>
   if (!principal) return <Login onLogin={setPrincipal}/>
 
   return <div className="app">
