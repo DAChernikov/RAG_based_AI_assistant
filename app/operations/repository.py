@@ -34,6 +34,7 @@ from app.state.models import (
     SourceSchedule,
     SourceVersion,
     SourceVersionStatus,
+    TelegramBotConfiguration,
     TelegramConfiguration,
 )
 
@@ -53,11 +54,108 @@ class OperationsRepository:
 
     def list_enabled_telegram_configurations(self):
         with self.session_factory() as session:
-            return list(
+            bots = list(
                 session.scalars(
-                    select(TelegramConfiguration).where(TelegramConfiguration.is_enabled.is_(True))
+                    select(TelegramBotConfiguration).where(
+                        TelegramBotConfiguration.is_enabled.is_(True)
+                    )
                 )
             )
+            configured_tenants = {row.tenant_id for row in bots}
+            bots.extend(
+                session.scalars(
+                    select(TelegramConfiguration).where(
+                        TelegramConfiguration.is_enabled.is_(True),
+                        TelegramConfiguration.tenant_id.not_in(configured_tenants),
+                    )
+                )
+            )
+            return bots
+
+    def list_telegram_bots(self, tenant_id: uuid.UUID):
+        with self.session_factory() as session:
+            return list(
+                session.scalars(
+                    select(TelegramBotConfiguration)
+                    .where(TelegramBotConfiguration.tenant_id == tenant_id)
+                    .order_by(TelegramBotConfiguration.created_at)
+                )
+            )
+
+    def create_telegram_bot(
+        self,
+        tenant_id: uuid.UUID,
+        *,
+        name: str,
+        is_enabled: bool,
+        token_credential_ref: str,
+        api_key_credential_ref: str,
+    ):
+        with self.session_factory.begin() as session:
+            row = TelegramBotConfiguration(
+                tenant_id=tenant_id,
+                name=name,
+                is_enabled=is_enabled,
+                token_credential_ref=token_credential_ref,
+                api_key_credential_ref=api_key_credential_ref,
+            )
+            session.add(row)
+            session.flush()
+            return row
+
+    def get_telegram_bot(self, tenant_id: uuid.UUID, bot_id: uuid.UUID):
+        with self.session_factory() as session:
+            return session.scalar(
+                select(TelegramBotConfiguration).where(
+                    TelegramBotConfiguration.id == bot_id,
+                    TelegramBotConfiguration.tenant_id == tenant_id,
+                )
+            )
+
+    def update_telegram_bot(self, tenant_id: uuid.UUID, bot_id: uuid.UUID, *, is_enabled: bool):
+        with self.session_factory.begin() as session:
+            row = session.scalar(
+                select(TelegramBotConfiguration)
+                .where(
+                    TelegramBotConfiguration.id == bot_id,
+                    TelegramBotConfiguration.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise LookupError("Telegram bot was not found.")
+            row.is_enabled = is_enabled
+            row.config_version += 1
+            return row
+
+    def record_telegram_bot_test(self, tenant_id: uuid.UUID, bot_id: uuid.UUID, status: str):
+        with self.session_factory.begin() as session:
+            row = session.scalar(
+                select(TelegramBotConfiguration)
+                .where(
+                    TelegramBotConfiguration.id == bot_id,
+                    TelegramBotConfiguration.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise LookupError("Telegram bot was not found.")
+            row.last_test_status = status
+            row.last_tested_at = datetime.now(UTC)
+            return row
+
+    def delete_telegram_bot(self, tenant_id: uuid.UUID, bot_id: uuid.UUID) -> bool:
+        with self.session_factory.begin() as session:
+            row = session.scalar(
+                select(TelegramBotConfiguration).where(
+                    TelegramBotConfiguration.id == bot_id,
+                    TelegramBotConfiguration.tenant_id == tenant_id,
+                )
+            )
+            if row is None:
+                return False
+            session.delete(row)
+            return True
 
     def upsert_telegram_configuration(
         self,

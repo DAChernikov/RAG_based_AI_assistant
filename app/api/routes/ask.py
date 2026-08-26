@@ -53,9 +53,11 @@ async def _submit_queued(payload, runtime, idempotency_key, principal: Principal
     if application is None:
         raise HTTPException(status_code=503, detail="Queued inference is not ready.")
     try:
-        knowledge_base_id = await runtime["hybrid_retriever"].resolve_knowledge_base(
-            principal.tenant_id, payload.knowledge_base_id
-        )
+        knowledge_base_id = None
+        if payload.mode != "model":
+            knowledge_base_id = await runtime["hybrid_retriever"].resolve_knowledge_base(
+                principal.tenant_id, payload.knowledge_base_id
+            )
         request_payload = payload.model_dump(mode="json")
         request_payload["knowledge_base_id"] = knowledge_base_id
         return await application.submit(

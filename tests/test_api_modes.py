@@ -56,6 +56,7 @@ class FakeQueuedApplication:
         conversation_id,
     ):
         self.idempotency_key = idempotency_key
+        self.payload = payload
         return SimpleNamespace(job=self.job, created=True), self.contract
 
     async def wait_for_terminal(self, job_id):
@@ -95,6 +96,17 @@ def test_ask_queued_mode_preserves_response_and_exposes_job_headers():
     assert response.json()["answer"] == "queued answer"
     assert response.headers["X-Inference-Job-Id"] == str(application.job_id)
     assert application.idempotency_key == "request-1"
+
+
+def test_ask_model_only_does_not_require_or_resolve_a_knowledge_base():
+    application = FakeQueuedApplication()
+    client = build_client(queued_runtime(application))
+
+    response = client.post("/ask", json={"question": "hello", "mode": "model"})
+
+    assert response.status_code == 200
+    assert application.payload["mode"] == "model"
+    assert application.payload["knowledge_base_id"] is None
 
 
 def test_async_job_endpoint_returns_202_and_urls():

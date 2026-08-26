@@ -61,7 +61,11 @@ class InferenceProcessor:
             contract.knowledge_base_id,
             contract.requested_mode,
         )
-        prompt_name = "sql-generation" if plan.requires_sql else "grounded-answer"
+        prompt_name = (
+            "sql-generation"
+            if plan.requires_sql
+            else ("grounded-answer" if plan.retrieval_targets else "general-answer")
+        )
         prompt_definition = await api_blocking_io.call(
             self.registry.prompt, contract.tenant_id, prompt_name
         )
@@ -103,7 +107,11 @@ class InferenceProcessor:
         mode = (
             "sql"
             if plan.requires_sql
-            else ("rag_code" if "code" in plan.retrieval_targets else "rag_docs")
+            else (
+                "rag_code"
+                if "code" in plan.retrieval_targets
+                else ("rag_docs" if plan.retrieval_targets else "model")
+            )
         )
         await emit(
             "meta",

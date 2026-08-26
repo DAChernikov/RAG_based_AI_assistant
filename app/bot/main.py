@@ -52,7 +52,7 @@ async def run_bot() -> None:
     secret_store = EncryptedDatabaseSecretStore(
         repository.session_factory, load_master_key(settings)
     )
-    applications: dict[uuid.UUID, tuple[int, Application]] = {}
+    applications: dict[tuple[uuid.UUID, uuid.UUID], tuple[int, Application]] = {}
     heartbeat_redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
         while True:
@@ -61,15 +61,16 @@ async def run_bot() -> None:
                 "rag:bot:heartbeat", "idle" if not applications else "active", ex=20
             )
             rows = await connector_blocking_io.call(repository.list_enabled_telegram_configurations)
-            desired = {row.tenant_id: row for row in rows}
-            for tenant_id, (_version, application) in list(applications.items()):
-                row = desired.get(tenant_id)
-                if row is None or row.config_version != applications[tenant_id][0]:
+            desired = {(row.tenant_id, getattr(row, "id", row.tenant_id)): row for row in rows}
+            for key, (_version, application) in list(applications.items()):
+                row = desired.get(key)
+                if row is None or row.config_version != applications[key][0]:
                     await _stop(application)
-                    applications.pop(tenant_id)
-            for tenant_id, row in desired.items():
-                if tenant_id in applications:
+                    applications.pop(key)
+            for key, row in desired.items():
+                if key in applications:
                     continue
+                tenant_id = row.tenant_id
                 if row.token_credential_ref and row.api_key_credential_ref:
                     try:
                         token = await connector_blocking_io.call(
@@ -80,7 +81,7 @@ async def run_bot() -> None:
                         )
                         application = build_application(token["value"], api_key["value"])
                         await _start(application)
-                        applications[tenant_id] = (row.config_version, application)
+                        applications[key] = (row.config_version, application)
                     except (SecretStoreError, KeyError, RuntimeError) as exc:
                         log_event(
                             "telegram_configuration_failed",

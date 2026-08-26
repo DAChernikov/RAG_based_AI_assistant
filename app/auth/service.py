@@ -178,6 +178,46 @@ class AuthService:
             credential_id=item.id,
         )
 
+    async def change_password(
+        self,
+        principal: Principal,
+        current_password: str,
+        new_password: str,
+        correlation_id: uuid.UUID,
+    ) -> None:
+        user = await self._call(
+            self.repository.get_active_user, principal.tenant_id, principal.user_id
+        )
+        if user is None or not self.passwords.verify(user.password_hash, current_password):
+            await self._call(
+                self.repository.audit,
+                tenant_id=principal.tenant_id,
+                actor_user_id=principal.user_id,
+                action="auth.password.change",
+                outcome="denied",
+                correlation_id=correlation_id,
+            )
+            raise AuthenticationError("Current password is incorrect.")
+        await self._call(
+            self.repository.update_user,
+            principal.tenant_id,
+            principal.user_id,
+            display_name=None,
+            role=None,
+            is_active=None,
+            password_hash=self.passwords.hash(new_password),
+        )
+        await self._call(
+            self.repository.audit,
+            tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id,
+            action="auth.password.change",
+            outcome="success",
+            correlation_id=correlation_id,
+            resource_type="user",
+            resource_id=str(principal.user_id),
+        )
+
     async def create_api_key(
         self,
         principal: Principal,

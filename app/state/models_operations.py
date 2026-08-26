@@ -202,3 +202,23 @@ class TelegramConfiguration(TimestampMixin, Base):
     config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_test_status: Mapped[str | None] = mapped_column(String(30))
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramBotConfiguration(TimestampMixin, Base):
+    __tablename__ = "telegram_bot_configurations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_telegram_bots_tenant_name"),
+        Index("ix_telegram_bots_tenant_enabled", "tenant_id", "is_enabled"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    token_credential_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_key_credential_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_test_status: Mapped[str | None] = mapped_column(String(30))
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -5,6 +5,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from app.api.config import settings
 from app.api.dependencies import get_runtime_state, require_admin
@@ -28,6 +29,17 @@ class TelegramInput(BaseModel):
     )
 
 
+class TelegramBotInput(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    enabled: bool = False
+    token_credential_ref: str = Field(pattern=r"^credential:[A-Za-z0-9_.:/-]+$")
+    api_key_credential_ref: str = Field(pattern=r"^credential:[A-Za-z0-9_.:/-]+$")
+
+
+class TelegramBotUpdate(BaseModel):
+    enabled: bool
+
+
 def _telegram(row) -> dict:
     return {
         "enabled": bool(row and row.is_enabled),
@@ -36,6 +48,17 @@ def _telegram(row) -> dict:
         "config_version": row.config_version if row else 0,
         "last_test_status": row.last_test_status if row else None,
         "last_tested_at": row.last_tested_at if row else None,
+    }
+
+
+def _telegram_bot(row) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "enabled": row.is_enabled,
+        "config_version": row.config_version,
+        "last_test_status": row.last_test_status,
+        "last_tested_at": row.last_tested_at,
     }
 
 
@@ -115,12 +138,23 @@ async def system_status(
     telegram = await runtime["catalog_service"].call(
         runtime["operations_repository"].get_telegram_configuration, principal.tenant_id
     )
-    if telegram is None or not telegram.is_enabled:
+    telegram_bots = await runtime["catalog_service"].call(
+        runtime["operations_repository"].list_telegram_bots, principal.tenant_id
+    )
+    telegram_enabled = any(row.is_enabled for row in telegram_bots) or bool(
+        telegram and telegram.is_enabled
+    )
+    if not telegram_enabled:
         components["telegram"] = "disabled"
     elif components["telegram_worker"] != "ready":
         components["telegram"] = "not_ready"
     else:
-        components["telegram"] = telegram.last_test_status or "configured"
+        tested = [row.last_test_status for row in telegram_bots if row.is_enabled]
+        components["telegram"] = (
+            "ready"
+            if tested and all(status == "ready" for status in tested)
+            else (telegram.last_test_status if telegram else None) or "configured"
+        )
     required = (
         "api",
         "postgresql",
@@ -134,7 +168,7 @@ async def system_status(
         "generation",
     )
     ready = all(components[name] == "ready" for name in required)
-    if telegram is not None and telegram.is_enabled:
+    if telegram_enabled:
         ready = ready and components["telegram"] == "ready"
     return {"status": "ready" if ready else "degraded", "components": components}
 
@@ -193,6 +227,156 @@ async def get_telegram(
         runtime["operations_repository"].get_telegram_configuration, principal.tenant_id
     )
     return _telegram(row)
+
+
+@router.get("/telegram-bots")
+async def list_telegram_bots(
+    principal: Principal = Depends(require_admin), runtime=Depends(get_runtime_state)
+):
+    rows = await runtime["catalog_service"].call(
+        runtime["operations_repository"].list_telegram_bots, principal.tenant_id
+    )
+    return [_telegram_bot(row) for row in rows]
+
+
+@router.post("/telegram-bots", status_code=201)
+async def create_telegram_bot(
+    payload: TelegramBotInput,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    for reference in (payload.token_credential_ref, payload.api_key_credential_ref):
+        try:
+            await runtime["catalog_service"].call(
+                runtime["secret_store"].resolve, principal.tenant_id, reference
+            )
+        except SecretStoreError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        row = await runtime["catalog_service"].call(
+            runtime["operations_repository"].create_telegram_bot,
+            principal.tenant_id,
+            name=payload.name,
+            is_enabled=payload.enabled,
+            token_credential_ref=payload.token_credential_ref,
+            api_key_credential_ref=payload.api_key_credential_ref,
+        )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Telegram bot name already exists.") from exc
+    await _audit(
+        request,
+        runtime,
+        principal,
+        "telegram.bot.create",
+        "telegram_bot_configuration",
+        row.id,
+        {"enabled": row.is_enabled},
+    )
+    return _telegram_bot(row)
+
+
+@router.patch("/telegram-bots/{bot_id}")
+async def update_telegram_bot(
+    bot_id: uuid.UUID,
+    payload: TelegramBotUpdate,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    try:
+        row = await runtime["catalog_service"].call(
+            runtime["operations_repository"].update_telegram_bot,
+            principal.tenant_id,
+            bot_id,
+            is_enabled=payload.enabled,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await _audit(
+        request,
+        runtime,
+        principal,
+        "telegram.bot.update",
+        "telegram_bot_configuration",
+        bot_id,
+        {"enabled": row.is_enabled, "config_version": row.config_version},
+    )
+    return _telegram_bot(row)
+
+
+@router.delete("/telegram-bots/{bot_id}", status_code=204)
+async def delete_telegram_bot(
+    bot_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    changed = await runtime["catalog_service"].call(
+        runtime["operations_repository"].delete_telegram_bot,
+        principal.tenant_id,
+        bot_id,
+    )
+    if not changed:
+        raise HTTPException(status_code=404, detail="Telegram bot was not found.")
+    await _audit(
+        request,
+        runtime,
+        principal,
+        "telegram.bot.delete",
+        "telegram_bot_configuration",
+        bot_id,
+    )
+
+
+@router.post("/telegram-bots/{bot_id}/test")
+async def test_named_telegram_bot(
+    bot_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    row = await runtime["catalog_service"].call(
+        runtime["operations_repository"].get_telegram_bot,
+        principal.tenant_id,
+        bot_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Telegram bot was not found.")
+    token = await runtime["catalog_service"].call(
+        runtime["secret_store"].resolve,
+        principal.tenant_id,
+        row.token_credential_ref,
+    )
+    status = "unavailable"
+    client = runtime.get("telegram_test_client")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5), trust_env=False)
+    try:
+        response = await client.get(f"https://api.telegram.org/bot{token['value']}/getMe")
+        status = "ready" if response.is_success and response.json().get("ok") else "unavailable"
+    except (httpx.HTTPError, ValueError, KeyError):
+        pass
+    finally:
+        if owns_client:
+            await client.aclose()
+    await runtime["catalog_service"].call(
+        runtime["operations_repository"].record_telegram_bot_test,
+        principal.tenant_id,
+        bot_id,
+        status,
+    )
+    await _audit(
+        request,
+        runtime,
+        principal,
+        "telegram.bot.test",
+        "telegram_bot_configuration",
+        bot_id,
+        {"status": status},
+    )
+    return {"status": status}
 
 
 @router.put("/telegram")

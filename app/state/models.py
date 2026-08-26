@@ -60,6 +60,7 @@ from app.state.models_operations import (
     ScheduleAttempt,
     SourceSchedule,
     SystemSetup,
+    TelegramBotConfiguration,
     TelegramConfiguration,
 )
 
@@ -110,4 +111,5 @@ __all__ = [
     "SystemSetup",
     "CredentialSecret",
     "TelegramConfiguration",
+    "TelegramBotConfiguration",
 ]

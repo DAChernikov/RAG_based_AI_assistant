@@ -4,7 +4,9 @@ import csv
 import io
 import uuid
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
@@ -45,6 +47,54 @@ class PromptInput(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     version: str = Field(min_length=1, max_length=100)
     template: str = Field(min_length=1, max_length=50_000)
+
+
+class OllamaPullInput(BaseModel):
+    model: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_.:/-]+$")
+
+
+def _ollama_root(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+async def _ollama_request(runtime, model, method: str, path: str, payload: dict | None = None):
+    if (model.capabilities or {}).get("provider") != "ollama":
+        raise HTTPException(status_code=422, detail="This model is not configured as Ollama.")
+    from app.operations.runtime_registry import ResolvedModel
+
+    resolved = ResolvedModel(
+        model.id,
+        model.role,
+        model.model_id,
+        model.version,
+        model.endpoint_ref,
+        model.credential_ref,
+        model.capabilities or {},
+        model.tenant_id or uuid.UUID(int=0),
+    )
+    base_url, token = await api_blocking_io.call(runtime["runtime_registry"].endpoint, resolved)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    transport = runtime.get("ollama_http_transport")
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=httpx.Timeout(600.0, connect=10.0, read=600.0),
+            trust_env=False,
+        ) as client:
+            response = await client.request(
+                method,
+                f"{_ollama_root(base_url)}{path}",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Ollama endpoint is unavailable.") from exc
 
 
 def _schedule(row):
@@ -305,6 +355,58 @@ async def activate_model(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     await _audit(request, runtime, principal, "model.activate", "model_definition", model_id)
     return {"id": row.id, "role": row.role, "model_id": row.model_id, "is_active": True}
+
+
+@router.get("/models/{model_id}/ollama/models")
+async def ollama_models(
+    model_id: uuid.UUID,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    row = await runtime["catalog_service"].call(
+        runtime["operations_repository"].get_model, model_id
+    )
+    if row is None or row.tenant_id != principal.tenant_id:
+        raise HTTPException(status_code=404, detail="Model definition was not found.")
+    result = await _ollama_request(runtime, row, "GET", "/api/tags")
+    return [
+        {
+            "name": item.get("name", ""),
+            "size": item.get("size"),
+            "modified_at": item.get("modified_at"),
+            "details": item.get("details") or {},
+        }
+        for item in result.get("models", [])
+        if item.get("name")
+    ]
+
+
+@router.post("/models/{model_id}/ollama/pull")
+async def ollama_pull(
+    model_id: uuid.UUID,
+    payload: OllamaPullInput,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    runtime=Depends(get_runtime_state),
+):
+    row = await runtime["catalog_service"].call(
+        runtime["operations_repository"].get_model, model_id
+    )
+    if row is None or row.tenant_id != principal.tenant_id:
+        raise HTTPException(status_code=404, detail="Model definition was not found.")
+    result = await _ollama_request(
+        runtime, row, "POST", "/api/pull", {"name": payload.model, "stream": False}
+    )
+    await _audit(
+        request,
+        runtime,
+        principal,
+        "ollama.model.pull",
+        "model_definition",
+        row.id,
+        {"model_id": payload.model},
+    )
+    return {"status": result.get("status", "success"), "model": payload.model}
 
 
 @router.get("/prompts")

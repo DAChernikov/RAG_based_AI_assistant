@@ -3,6 +3,7 @@ import secrets
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
 
 from app.api.auth_schemas import (
+    ChangePasswordRequest,
     LoginRequest,
     LogoutRequest,
     MeResponse,
@@ -133,3 +134,23 @@ async def me(principal: Principal = Depends(get_principal)):
         auth_method=principal.auth_method,
         scopes=sorted(principal.scopes),
     )
+
+
+@router.post("/change-password", status_code=204)
+async def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    runtime=Depends(get_runtime_state),
+):
+    if principal.auth_method != "jwt":
+        raise HTTPException(status_code=403, detail="Password change requires a user session.")
+    try:
+        await _service(runtime).change_password(
+            principal,
+            payload.current_password,
+            payload.new_password,
+            request.state.correlation_id,
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc

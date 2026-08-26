@@ -11,7 +11,7 @@ from app.retrieval.contracts import RetrievalFilters
 
 class RoutePlan(BaseModel):
     contract_version: Literal["1.0"] = "1.0"
-    knowledge_base_id: uuid.UUID
+    knowledge_base_id: uuid.UUID | None = None
     intents: list[str]
     retrieval_targets: list[Literal["documentation", "code", "database_schema"]]
     source_filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
@@ -46,9 +46,19 @@ class RouterService:
     def plan(
         self,
         question: str,
-        knowledge_base_id: uuid.UUID,
+        knowledge_base_id: uuid.UUID | None,
         requested_mode: str | None = None,
     ) -> RoutePlan:
+        if requested_mode == "model" or knowledge_base_id is None:
+            return RoutePlan(
+                knowledge_base_id=None,
+                intents=["general_answer"],
+                retrieval_targets=[],
+                requires_sql=False,
+                confidence=1.0,
+                reasons=["model-only mode was selected; retrieval is disabled"],
+            )
+
         normalized = re.sub(r"[^\w]+", " ", question.casefold())
         tokens = set(normalized.split())
         sql = requested_mode == "sql" or bool(tokens & self.SQL_HINTS)

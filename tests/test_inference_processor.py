@@ -42,8 +42,13 @@ class Registry:
         raise RuntimeConfigurationError("optional reranker is absent")
 
     def prompt(self, _tenant_id, name):
+        prompt_id = {
+            "grounded-answer": 11,
+            "sql-generation": 12,
+            "general-answer": 13,
+        }[name]
         return ResolvedPrompt(
-            uuid.UUID(int=11 if name == "grounded-answer" else 12),
+            uuid.UUID(int=prompt_id),
             name,
             "2.0",
             "Mode {mode}\nQuestion {question}\nContext {context}",
@@ -114,6 +119,12 @@ def contract(question, mode=None):
     )
 
 
+def model_only_contract(question):
+    value = contract(question, "model")
+    value.knowledge_base_id = None
+    return value
+
+
 @pytest.mark.asyncio
 async def test_processor_uses_registry_prompt_and_model_for_grounded_stream():
     events = []
@@ -146,6 +157,22 @@ async def test_processor_uses_registry_sql_prompt_and_preserves_validation(monke
     assert result["prompt_template_id"] == uuid.UUID(int=12)
     assert result["confidence"]["validation"]["is_valid"] is True
     assert events[-1][0] == "token"
+
+
+@pytest.mark.asyncio
+async def test_processor_model_only_uses_general_prompt_without_retrieval():
+    events = []
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    result = await processor().execute(model_only_contract("What do you know?"), emit)
+
+    assert result["mode"] == "model"
+    assert result["retrieved"] == []
+    assert result["prompt_template_id"] == uuid.UUID(int=13)
+    assert result["prompt_version"] == "general-answer/2.0"
+    assert events[0][1]["retrieved"] == []
 
 
 @pytest.mark.asyncio

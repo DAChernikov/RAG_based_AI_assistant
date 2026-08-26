@@ -207,6 +207,54 @@ def test_telegram_configuration_uses_references_and_supports_hot_reload():
     assert reloaded["last_test_status"] == "ready"
 
 
+def test_multiple_telegram_bots_are_isolated_and_hot_reloadable():
+    client, runtime, _ = context()
+    for number in (1, 2):
+        token_ref = f"credential:telegram-token-{number}"
+        key_ref = f"credential:telegram-key-{number}"
+        for reference, kind, value in (
+            (token_ref, "telegram_token", f"123:bot-token-{number}"),
+            (key_ref, "telegram_api_key", f"rag_key_for_bot_{number}"),
+        ):
+            assert (
+                client.put(
+                    f"/v1/admin/credentials/{reference}",
+                    json={"reference": reference, "kind": kind, "secret": value},
+                ).status_code
+                == 200
+            )
+        created = client.post(
+            "/v1/admin/telegram-bots",
+            json={
+                "name": f"Bot {number}",
+                "enabled": True,
+                "token_credential_ref": token_ref,
+                "api_key_credential_ref": key_ref,
+            },
+        )
+        assert created.status_code == 201
+        assert "bot-token" not in created.text
+
+    bots = client.get("/v1/admin/telegram-bots").json()
+    assert {row["name"] for row in bots} == {"Bot 1", "Bot 2"}
+    first = bots[0]
+    disabled = client.patch(f"/v1/admin/telegram-bots/{first['id']}", json={"enabled": False})
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["config_version"] == 2
+
+    runtime["telegram_test_client"] = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"ok": True}))
+    )
+    try:
+        assert client.post(f"/v1/admin/telegram-bots/{bots[1]['id']}/test").json() == {
+            "status": "ready"
+        }
+    finally:
+        asyncio.run(runtime["telegram_test_client"].aclose())
+    assert client.delete(f"/v1/admin/telegram-bots/{first['id']}").status_code == 204
+    assert len(client.get("/v1/admin/telegram-bots").json()) == 1
+
+
 def test_setup_progress_is_tenant_bound():
     client, runtime, principal = context()
     with runtime["setup_repository"].session_factory.begin() as session:

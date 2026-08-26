@@ -213,3 +213,30 @@ async def test_queued_application_submit_idempotency_wait_and_serialization(monk
     serialized = serialize_job(job)
     assert serialized["answer"]["answer"] == "answer"
     assert serialized["sources"][0]["uri"] == "git://x"
+
+
+@pytest.mark.asyncio
+async def test_queued_application_accepts_model_only_job_without_knowledge_base():
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        user_message_id=uuid.uuid4(),
+        status=JobStatus.QUEUED.value,
+        contract_version="1.0",
+    )
+    repository = Repository(job)
+    queue = Queue()
+
+    _, contract = await QueuedInferenceApplication(repository, queue).submit(
+        {"question": "hello", "mode": "model", "knowledge_base_id": None},
+        tenant_id=job.tenant_id,
+        user_id=job.user_id,
+        idempotency_key=None,
+        conversation_id=None,
+    )
+
+    assert contract.knowledge_base_id is None
+    assert contract.requested_mode == "model"
+    assert queue.jobs == [contract]

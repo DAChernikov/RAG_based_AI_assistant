@@ -29,3 +29,13 @@ def test_explicit_mode_is_honored_without_becoming_exclusive():
     assert "documentation" in plan.retrieval_targets
     assert "code" in plan.retrieval_targets
     assert "database_schema" in plan.retrieval_targets
+
+
+def test_model_only_route_never_runs_retrieval_without_a_knowledge_base():
+    plan = RouterService().plan("What do you know?", None, requested_mode="model")
+
+    assert plan.knowledge_base_id is None
+    assert plan.intents == ["general_answer"]
+    assert plan.retrieval_targets == []
+    assert plan.requires_sql is False
+    assert plan.confidence == 1.0

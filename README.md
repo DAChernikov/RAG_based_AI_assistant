@@ -31,7 +31,7 @@ Default Compose запускает CPU embedding service с `EMBEDDING_WARMUP=tr
 
 На macOS generation server остаётся нативным и доступен контейнерам по `host.docker.internal:11434`. Для заранее запущенного нативного embedding endpoint используйте `-f compose.native-models.yml`; dev-порты БД/Redis включаются только через `-f compose.dev.yml`.
 
-При первой загрузке Web UI открывает Setup Wizard: создайте tenant/admin, зарегистрируйте и проверьте generation/embedding/optional reranker, при необходимости настройте Telegram и проверьте сервисы. Progress хранится в PostgreSQL и продолжается после reload. После атомарного создания первого администратора bootstrap endpoint закрывается навсегда. `make bootstrap-admin` остаётся только аварийным fallback:
+При первой загрузке Web UI открывает Setup Wizard: создайте tenant/admin, зарегистрируйте и проверьте generation/embedding/optional reranker, при необходимости настройте Telegram и проверьте сервисы. Progress хранится в PostgreSQL и продолжается после reload. Форма модели фиксируется до асинхронной проверки endpoint, поэтому browser event не теряется, а secret-поля безопасно очищаются после ответа. После атомарного создания первого администратора bootstrap endpoint закрывается навсегда. `make bootstrap-admin` остаётся только аварийным fallback:
 
 ```bash
 read -rs BOOTSTRAP_ADMIN_PASSWORD; echo; export BOOTSTRAP_ADMIN_PASSWORD
@@ -51,7 +51,8 @@ unset BOOTSTRAP_ADMIN_PASSWORD
 
 ## Использование
 
-- Web UI: chat, resumable SSE, history/citations/feedback и tenant admin operations.
+- Web UI: chat с knowledge base или режимом «Без базы знаний», resumable SSE, history/citations/feedback, Guide для пользователя/администратора, светлая/тёмная темы и tenant admin operations.
+- Admin UI: service dashboard, Ollama/self-hosted model endpoints, инструкции моделям, typed Connections с подробными hints и сборка knowledge base из нескольких источников. Credentials вводятся в нужной форме, шифруются и не возвращаются браузеру.
 - HTTP: `/ask`, `/ask/stream`, `/v1/inference-jobs/**`, `/v1/conversations/**`; OpenAPI — `/docs`.
 - Telegram: в Admin UI создайте token/API-key credential references и включите bot. Процесс постоянно работает в безопасном idle state и применяет новую config version без rebuild.
 - Public: `/health`; sanitized `/ready`. `/metrics` и `/admin/runtime` должны быть доступны только из trusted network/reverse proxy; runtime endpoint дополнительно admin-only.

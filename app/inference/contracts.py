@@ -21,7 +21,7 @@ class InferenceJobContract(BaseModel):
     user_id: uuid.UUID
     conversation_id: uuid.UUID
     message_id: uuid.UUID
-    knowledge_base_id: uuid.UUID
+    knowledge_base_id: uuid.UUID | None = None
     question: str = Field(min_length=1)
     requested_mode: str | None = None
     top_k: int | None = Field(default=None, ge=1, le=50)

@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -110,6 +111,9 @@ class Generation:
 class RuntimeRegistry:
     def generation_client(self, _model):
         return Generation()
+
+    def endpoint(self, model):
+        return model.capabilities.get("base_url", "http://ollama:11434/v1"), None
 
 
 def build_client():
@@ -264,3 +268,41 @@ def test_indexing_admin_api_lifecycle_tenant_safe_contract():
     assert client.post(f"/v1/admin/indexing-runs/{repository.run.id}/cancel").status_code == 204
     assert client.get("/v1/admin/embedding-runtime").json()["model_ready"] is True
     assert client.get(f"/v1/admin/indexing-runs/{uuid.uuid4()}").status_code == 404
+
+
+def test_ollama_catalog_and_explicit_pull_use_configured_self_hosted_endpoint():
+    client, runtime, _, _ = build_client()
+    observed = []
+
+    def handler(request: httpx.Request):
+        observed.append((request.method, str(request.url), request.content))
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen2.5-coder:7b", "size": 4_700_000_000}]},
+            )
+        if request.url.path == "/api/pull":
+            return httpx.Response(200, json={"status": "success"})
+        return httpx.Response(404)
+
+    runtime["ollama_http_transport"] = httpx.MockTransport(handler)
+    model = client.post(
+        "/v1/admin/models",
+        json={
+            "role": "generation",
+            "model_id": "qwen2.5-coder:7b",
+            "version": "1",
+            "base_url": "http://ollama.internal:11434/v1",
+            "capabilities": {"provider": "ollama"},
+        },
+    ).json()
+    listed = client.get(f"/v1/admin/models/{model['id']}/ollama/models")
+    assert listed.status_code == 200
+    assert listed.json()[0]["name"] == "qwen2.5-coder:7b"
+    pulled = client.post(
+        f"/v1/admin/models/{model['id']}/ollama/pull",
+        json={"model": "qwen2.5:7b"},
+    )
+    assert pulled.json() == {"status": "success", "model": "qwen2.5:7b"}
+    assert [method for method, _, _ in observed] == ["GET", "POST"]
+    assert all("/v1/api/" not in url for _, url, _ in observed)

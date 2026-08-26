@@ -39,27 +39,106 @@ export function SetupWizard({ initial, principal, onAuthenticated, onComplete }:
   }
 
   async function configureModels(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setNotice(undefined); const data = new FormData(event.currentTarget)
+    event.preventDefault()
+
+    const form = event.currentTarget
+    const data = new FormData(form)
+
+    setBusy(true)
+    setNotice(undefined)
+
     try {
-      const roles: Array<'generation' | 'embedding' | 'reranker'> = ['generation', 'embedding']
-      if (data.get('reranker_model')) roles.push('reranker')
-      for (const role of roles) {
-        const token = String(data.get(`${role}_token`) || '')
-        const credential = token ? `credential:setup-${role}` : null
-        if (token) await api.mutate(`/v1/admin/credentials/${credential}`, 'PUT', { reference: credential, kind: 'model_token', secret: token })
-        const created = await api.mutate<{ id: string }>('/v1/admin/models', 'POST', {
-          role, model_id: data.get(`${role}_model`), version: data.get(`${role}_version`),
-          base_url: data.get(`${role}_url`), credential_ref: credential,
-          capabilities: role === 'embedding' ? { dimensions: Number(data.get('embedding_dimensions')) } : {},
+        const roles: Array<'generation' | 'embedding' | 'reranker'> = [
+            'generation',
+            'embedding',
+        ]
+
+        if (data.get('reranker_model')) {
+            roles.push('reranker')
+        }
+
+        for (const role of roles) {
+            const token = String(data.get(`${role}_token`) || '')
+            const credential = token
+                ? `credential:setup-${role}`
+                : null
+
+            if (token) {
+                await api.mutate(
+                    `/v1/admin/credentials/${credential}`,
+                    'PUT',
+                    {
+                        reference: credential,
+                        kind: 'model_token',
+                        secret: token,
+                    },
+                )
+            }
+
+            const created = await api.mutate<{ id: string }>(
+                '/v1/admin/models',
+                'POST',
+                {
+                    role,
+                    model_id: data.get(`${role}_model`),
+                    version: data.get(`${role}_version`),
+                    base_url: data.get(`${role}_url`),
+                    credential_ref: credential,
+                    capabilities: {
+                        provider: 'ollama',
+                        ...(role === 'embedding'
+                            ? {
+                                  dimensions: Number(
+                                      data.get('embedding_dimensions'),
+                                  ),
+                              }
+                            : {}),
+                    },
+                },
+            )
+
+            const checked = await api.mutate<{
+                status: 'ready' | 'model_loading' | 'unavailable'
+            }>(
+                `/v1/admin/models/${created.id}/test`,
+                'POST',
+            )
+
+            if (checked.status === 'unavailable') {
+                throw new Error(
+                    `${role}: self-hosted endpoint недоступен.`,
+                )
+            }
+
+            await api.mutate(
+                `/v1/admin/models/${created.id}/activate`,
+                'POST',
+            )
+        }
+
+        form
+            .querySelectorAll<HTMLInputElement>('input[type=password]')
+            .forEach((input) => {
+                input.value = ''
+            })
+
+        await advance('telegram')
+
+        setNotice({
+            kind: 'success',
+            text: 'Модели сохранены и активированы.',
         })
-        const checked = await api.mutate<{ status: 'ready' | 'model_loading' | 'unavailable' }>(`/v1/admin/models/${created.id}/test`, 'POST')
-        if (checked.status === 'unavailable') throw new Error(`${role}: self-hosted endpoint недоступен.`)
-        await api.mutate(`/v1/admin/models/${created.id}/activate`, 'POST')
-      }
-      const form = event.currentTarget; form.querySelectorAll<HTMLInputElement>('input[type=password]').forEach((input) => { input.value = '' })
-      await advance('telegram'); setNotice({ kind: 'success', text: 'Модели сохранены и активированы.' })
-    } catch (reason) { setNotice({ kind: 'error', text: reason instanceof Error ? reason.message : 'Проверка модели не пройдена.' }) }
-    finally { setBusy(false) }
+    } catch (reason) {
+        setNotice({
+            kind: 'error',
+            text:
+                reason instanceof Error
+                    ? reason.message
+                    : 'Проверка модели не пройдена.',
+        })
+    } finally {
+        setBusy(false)
+    }
   }
 
   async function configureTelegram(event: FormEvent<HTMLFormElement>) {
@@ -72,8 +151,13 @@ export function SetupWizard({ initial, principal, onAuthenticated, onComplete }:
         const key = await api.mutate<{ api_key: string }>('/v1/api-keys', 'POST', { name: 'Telegram bot', scopes: ['inference:read', 'inference:write'] })
         await api.mutate(`/v1/admin/credentials/${keyRef}`, 'PUT', { reference: keyRef, kind: 'telegram_api_key', secret: key.api_key })
       }
-      await api.mutate('/v1/admin/telegram', 'PUT', { enabled, token_credential_ref: tokenRef, api_key_credential_ref: keyRef })
-      if (enabled) await api.mutate('/v1/admin/telegram/test', 'POST')
+      if (enabled && tokenRef && keyRef) {
+        const bot = await api.mutate<{ id: string }>('/v1/admin/telegram-bots', 'POST', {
+          name: 'Основной бот', enabled: true,
+          token_credential_ref: tokenRef, api_key_credential_ref: keyRef,
+        })
+        await api.mutate(`/v1/admin/telegram-bots/${bot.id}/test`, 'POST')
+      }
       form.reset(); await advance('readiness')
     } catch (reason) { setNotice({ kind: 'error', text: reason instanceof Error ? reason.message : 'Telegram не настроен.' }) }
     finally { setBusy(false) }

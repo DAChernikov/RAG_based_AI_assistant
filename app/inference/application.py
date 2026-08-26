@@ -80,7 +80,11 @@ class QueuedInferenceApplication:
             "top_k": payload.get("top_k"),
             "max_new_tokens": payload.get("max_new_tokens"),
             "conversation_id": str(conversation_id) if conversation_id else None,
-            "knowledge_base_id": str(payload["knowledge_base_id"]),
+            "knowledge_base_id": (
+                str(payload["knowledge_base_id"])
+                if payload.get("knowledge_base_id") is not None
+                else None
+            ),
         }
         creation = await _resolve(
             self.repository.create_job(
@@ -100,7 +104,7 @@ class QueuedInferenceApplication:
             user_id=user_id,
             conversation_id=creation.job.conversation_id,
             message_id=creation.job.user_message_id,
-            knowledge_base_id=payload["knowledge_base_id"],
+            knowledge_base_id=payload.get("knowledge_base_id"),
             question=payload["question"],
             requested_mode=payload.get("mode"),
             top_k=payload.get("top_k"),

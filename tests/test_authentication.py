@@ -219,6 +219,56 @@ def test_auth_endpoints_admin_permissions_and_api_key(auth_context):
     assert client.get("/v1/api-keys", headers={"X-API-Key": key_value}).status_code == 403
 
 
+def test_user_can_change_password_and_other_sessions_are_revoked(auth_context):
+    client, _ = build_auth_client(auth_context)
+    login = client.post(
+        "/v1/auth/login",
+        json={
+            "tenant_slug": "tenant-a",
+            "username": "alice",
+            "password": "alice-password-123",
+        },
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    denied = client.post(
+        "/v1/auth/change-password",
+        headers=headers,
+        json={"current_password": "wrong", "new_password": "new-password-456"},
+    )
+    assert denied.status_code == 401
+    changed = client.post(
+        "/v1/auth/change-password",
+        headers=headers,
+        json={
+            "current_password": "alice-password-123",
+            "new_password": "new-password-456",
+        },
+    )
+    assert changed.status_code == 204
+    assert (
+        client.post(
+            "/v1/auth/login",
+            json={
+                "tenant_slug": "tenant-a",
+                "username": "alice",
+                "password": "alice-password-123",
+            },
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/v1/auth/login",
+            json={
+                "tenant_slug": "tenant-a",
+                "username": "alice",
+                "password": "new-password-456",
+            },
+        ).status_code
+        == 200
+    )
+
+
 def test_audit_metadata_excludes_secrets(auth_context):
     _, repository, factory, _, user, _ = auth_context
     repository.audit(

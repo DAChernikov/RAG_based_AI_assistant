@@ -13,13 +13,25 @@ export type IngestionRun = { id: string; source_id: string; source_version_id: s
 export type IndexingRun = { id: string; knowledge_base_id: string; index_version_id: string; status: string; attempt_count: number; checkpoint: Record<string, unknown>; cancel_requested: boolean }
 export type IndexVersion = { id: string; knowledge_base_id: string; version_number: number; status: string; pinned: boolean; manifest: Record<string, unknown> }
 export type Schedule = { id: string; source_id: string; interval_seconds: number; is_enabled: boolean; next_run_at: string; last_run_at?: string }
-export type ModelDefinition = { id: string; role: 'generation' | 'embedding' | 'reranker'; model_id: string; version: string; endpoint_ref: string; base_url?: string; credential_ref?: string; capabilities: Record<string, unknown>; is_active: boolean }
+export type ModelDefinition = { id: string; role: 'generation' | 'embedding' | 'reranker'; model_id: string; version: string; endpoint_ref: string; base_url?: string; credential_ref?: string; capabilities: Record<string, string | number | boolean>; is_active: boolean }
 export type PromptTemplate = { id: string; name: string; version: string; checksum: string; is_active: boolean }
 export type AuditEvent = { id: string; actor_user_id?: string; action: string; resource_type?: string; resource_id?: string; outcome: string; correlation_id: string; created_at: string }
 export type SetupStatus = { required: boolean; setup_available: boolean; token_required: boolean; current_step: 'administrator' | 'models' | 'telegram' | 'readiness' | 'complete'; onboarding_complete: boolean; config_version: number }
 export type Credential = { id: string; reference: string; kind: string; masked_value: string; key_version: number; created_at: string; updated_at: string }
 export type SystemStatus = { status: 'ready' | 'degraded'; components: Record<string, string> }
 export type TelegramConfiguration = { enabled: boolean; token_credential_ref?: string; api_key_credential_ref?: string; config_version: number; last_test_status?: string }
+export type TelegramBotConfiguration = { id: string; name: string; enabled: boolean; config_version: number; last_test_status?: string; last_tested_at?: string }
+
+export function readableError(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (typeof record.message === 'string') return record.message
+    if (typeof record.detail === 'string') return record.detail
+    if (record.detail) return readableError(record.detail)
+  }
+  return 'Операция не выполнена. Проверьте диагностику или correlation ID.'
+}
 
 function cookie(name: string): string | undefined {
   return document.cookie.split('; ').find((row) => row.startsWith(`${name}=`))?.split('=')[1]
@@ -39,7 +51,7 @@ export class ApiClient {
     }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ detail: 'Request failed' }))
-      throw new Error(typeof payload.detail === 'string' ? payload.detail : JSON.stringify(payload.detail))
+      throw new Error(readableError(payload))
     }
     if (response.status === 204) return undefined as T
     return response.json() as Promise<T>
@@ -97,7 +109,7 @@ export class ApiClient {
 
   async streamAsk(
     question: string,
-    knowledgeBaseId: string,
+    knowledgeBaseId: string | undefined,
     onEvent: (event: { type: string; data: unknown; job_id?: string }) => void,
     signal: AbortSignal,
   ): Promise<void> {
@@ -111,7 +123,11 @@ export class ApiClient {
       if (lastEventId) headers['Last-Event-ID'] = lastEventId
       const response = await fetch(`${this.baseUrl}/ask/stream`, {
         method: 'POST', credentials: 'include', signal, headers,
-        body: JSON.stringify({ question, knowledge_base_id: knowledgeBaseId }),
+        body: JSON.stringify({
+          question,
+          knowledge_base_id: knowledgeBaseId || null,
+          mode: knowledgeBaseId ? null : 'model',
+        }),
       })
       if (response.status === 401 && await this.refresh()) continue
       if (!response.ok || !response.body) throw new Error(`Streaming failed (${response.status})`)
