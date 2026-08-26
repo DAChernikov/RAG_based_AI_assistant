@@ -63,6 +63,10 @@ function Chat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [history, setHistory] = useState<Conversation[]>([])
   const [historyVersion, setHistoryVersion] = useState(0)
+  const [currentConversationId, setCurrentConversationId] = useState<string>()
+  const [conversationMenu, setConversationMenu] = useState<string>()
+  const [renamingConversation, setRenamingConversation] = useState<string>()
+  const [renameTitle, setRenameTitle] = useState('')
   const [question, setQuestion] = useState('')
   const [error, setError] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
@@ -79,9 +83,51 @@ function Chat() {
   async function openConversation(id: string) {
     try {
       const item = await api.conversation(id)
+      setCurrentConversationId(id)
+      setConversationMenu(undefined)
       setMessages(item.messages.map((row) => ({ role: row.role, text: row.content })))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'История недоступна')
+    }
+  }
+  function newConversation() {
+    controller.current?.abort()
+    setCurrentConversationId(undefined)
+    setCurrentJob(undefined)
+    setMessages([])
+    setError('')
+    setConversationMenu(undefined)
+  }
+  async function pinConversation(item: Conversation) {
+    try {
+      await api.mutate(`/v1/conversations/${item.conversation_id}`, 'PATCH', { pinned: !item.pinned })
+      setConversationMenu(undefined)
+      setHistoryVersion((value) => value + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Не удалось изменить закрепление')
+    }
+  }
+  async function renameConversation(id: string) {
+    const title = renameTitle.trim()
+    if (!title) return
+    try {
+      await api.mutate(`/v1/conversations/${id}`, 'PATCH', { title })
+      setRenamingConversation(undefined)
+      setConversationMenu(undefined)
+      setHistoryVersion((value) => value + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Не удалось переименовать диалог')
+    }
+  }
+  async function deleteConversation(item: Conversation) {
+    if (!window.confirm(`Удалить диалог «${item.title || 'Новый диалог'}»? Это действие нельзя отменить.`)) return
+    try {
+      await api.mutate(`/v1/conversations/${item.conversation_id}`, 'DELETE')
+      if (currentConversationId === item.conversation_id) newConversation()
+      setConversationMenu(undefined)
+      setHistoryVersion((value) => value + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Не удалось удалить диалог')
     }
   }
   async function rate(answerId: string, rating: -1 | 1) {
@@ -101,8 +147,9 @@ function Chat() {
     setMessages((rows) => [...rows, { role: 'user', text: prompt }, { role: 'assistant', text: '' }])
     controller.current = new AbortController()
     try {
-      await api.streamAsk(prompt, base || undefined, (streamEvent) => {
+      await api.streamAsk(prompt, base || undefined, currentConversationId, (streamEvent) => {
         if (streamEvent.job_id) setCurrentJob(streamEvent.job_id)
+        if (streamEvent.conversation_id) setCurrentConversationId(streamEvent.conversation_id)
         setMessages((rows) => {
           const copy = [...rows]
           const last = { ...copy[copy.length - 1] }
@@ -119,12 +166,15 @@ function Chat() {
         if (['done', 'completed', 'failed'].includes(streamEvent.type)) setIsStreaming(false)
         if ((streamEvent.type === 'done' || streamEvent.type === 'completed') && streamEvent.job_id) {
           setHistoryVersion((value) => value + 1)
-          void api.job(streamEvent.job_id).then((job) => setMessages((current) => {
-            const updated = [...current]
-            const answer = { ...updated[updated.length - 1], answerId: job.answer?.answer_id }
-            updated[updated.length - 1] = answer
-            return updated
-          }))
+          void api.job(streamEvent.job_id).then((job) => {
+            setCurrentConversationId(job.conversation_id)
+            setMessages((current) => {
+              const updated = [...current]
+              const answer = { ...updated[updated.length - 1], answerId: job.answer?.answer_id }
+              updated[updated.length - 1] = answer
+              return updated
+            })
+          })
         }
       }, controller.current.signal)
     } catch (reason) {
@@ -143,7 +193,7 @@ function Chat() {
     <header className="page-header"><div><p className="eyebrow">AI WORKSPACE</p><h1>Ассистент</h1><p className="lead">Спросите модель напрямую или подключите проверяемый контекст.</p></div>
       <label className="context-picker"><span>Контекст ответа</span><select value={base} onChange={(event) => setBase(event.target.value)}><option value="">Без базы знаний · знания модели</option>{bases.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select><small>{base ? 'Ответ с retrieval и citations' : 'Retrieval отключён, ссылки не создаются'}</small></label></header>
     <div className="chat-layout">
-      <aside className="conversation-list"><div className="section-title"><strong>История</strong><span>{history.length}</span></div>{history.length === 0 ? <p className="empty-copy">Здесь появятся диалоги</p> : history.map((item) => <button className="conversation-item" key={item.conversation_id} onClick={() => void openConversation(item.conversation_id)}><span>{item.title || 'Новый диалог'}</span><small>{new Date(item.updated_at).toLocaleDateString()}</small></button>)}</aside>
+      <aside className="conversation-list"><div className="section-title"><strong>История</strong><span>{history.length}</span></div><button className="new-conversation secondary" onClick={newConversation}>＋ Новый диалог</button>{history.length === 0 ? <p className="empty-copy">Здесь появятся диалоги</p> : history.map((item) => <article className={`conversation-row ${currentConversationId === item.conversation_id ? 'active' : ''}`} key={item.conversation_id}>{renamingConversation === item.conversation_id ? <form className="conversation-rename" onSubmit={(event) => { event.preventDefault(); void renameConversation(item.conversation_id) }}><input value={renameTitle} onChange={(event) => setRenameTitle(event.target.value)} maxLength={255} autoFocus aria-label="Новое название диалога"/><div><button>Сохранить</button><button type="button" className="ghost" onClick={() => setRenamingConversation(undefined)}>Отмена</button></div></form> : <><button className="conversation-item" onClick={() => void openConversation(item.conversation_id)}><span>{item.pinned && <span className="pin" aria-label="Закреплён">◆</span>}{item.title || 'Новый диалог'}</span><small>{new Date(item.updated_at).toLocaleDateString()}</small></button><button className="conversation-more ghost" aria-label={`Действия с диалогом ${item.title || 'Новый диалог'}`} aria-expanded={conversationMenu === item.conversation_id} onClick={() => setConversationMenu((current) => current === item.conversation_id ? undefined : item.conversation_id)}>•••</button>{conversationMenu === item.conversation_id && <div className="conversation-actions" role="menu"><button className="ghost" role="menuitem" onClick={() => { setRenameTitle(item.title || 'Новый диалог'); setRenamingConversation(item.conversation_id) }}>Переименовать</button><button className="ghost" role="menuitem" onClick={() => void pinConversation(item)}>{item.pinned ? 'Открепить' : 'Закрепить'}</button><button className="ghost danger" role="menuitem" onClick={() => void deleteConversation(item)}>Удалить</button></div>}</>}</article>)}</aside>
       <div className="chat-column">
         <div className="messages" aria-live="polite">{messages.length === 0 && <div className="empty chat-empty"><div className="empty-icon">✦</div><h2>С чего начнём?</h2><p>{base ? 'Ответ будет основан на активном индексе выбранной базы.' : 'Модель ответит из собственных предобученных знаний.'}</p><div className="suggestions"><button onClick={() => setQuestion('Кратко расскажи, чем ты можешь мне помочь')}>Что ты умеешь?</button><button onClick={() => setQuestion('Предложи план решения моей задачи')}>Составить план</button></div></div>}
           {messages.map((message, index) => <article key={index} className={`message ${message.role}`}><div className="message-avatar">{message.role === 'user' ? 'В' : '✦'}</div><div className="message-body"><strong>{message.role === 'user' ? 'Вы' : 'Ассистент'}</strong><p>{message.text || 'Думаю…'}</p>

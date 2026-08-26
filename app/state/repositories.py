@@ -35,6 +35,10 @@ class ConversationAccessError(RuntimeError):
     pass
 
 
+class ConversationBusyError(RuntimeError):
+    pass
+
+
 class JobCancelledError(RuntimeError):
     pass
 
@@ -100,7 +104,10 @@ class ApplicationRepository:
 
             if conversation_id is None:
                 conversation = Conversation(
-                    tenant_id=tenant_id, user_id=user_id, next_message_sequence=1
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    title=question[:255],
+                    next_message_sequence=1,
                 )
                 session.add(conversation)
                 session.flush()
@@ -391,6 +398,7 @@ class ApplicationRepository:
             return {
                 "conversation_id": str(conversation.id),
                 "title": conversation.title,
+                "pinned": conversation.pinned,
                 "messages": [
                     {
                         "id": str(message.id),
@@ -413,7 +421,7 @@ class ApplicationRepository:
                     Conversation.tenant_id == tenant_id,
                     Conversation.user_id == user_id,
                 )
-                .order_by(Conversation.updated_at.desc())
+                .order_by(Conversation.pinned.desc(), Conversation.updated_at.desc())
                 .offset(offset)
                 .limit(limit)
             ).all()
@@ -421,11 +429,69 @@ class ApplicationRepository:
                 {
                     "conversation_id": str(row.id),
                     "title": row.title,
+                    "pinned": row.pinned,
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
                 }
                 for row in rows
             ]
+
+    def update_conversation(
+        self,
+        conversation_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+    ) -> dict[str, Any]:
+        with self.session_factory.begin() as session:
+            conversation = session.scalar(
+                select(Conversation).where(Conversation.id == conversation_id).with_for_update()
+            )
+            if (
+                conversation is None
+                or conversation.tenant_id != tenant_id
+                or conversation.user_id != user_id
+            ):
+                raise ConversationAccessError("Conversation was not found.")
+            if title is not None:
+                conversation.title = title
+            if pinned is not None:
+                conversation.pinned = pinned
+            session.flush()
+            return {
+                "conversation_id": str(conversation.id),
+                "title": conversation.title,
+                "pinned": conversation.pinned,
+                "created_at": conversation.created_at,
+                "updated_at": conversation.updated_at,
+            }
+
+    def delete_conversation(
+        self, conversation_id: uuid.UUID, tenant_id: uuid.UUID, user_id: uuid.UUID
+    ) -> None:
+        with self.session_factory.begin() as session:
+            conversation = session.scalar(
+                select(Conversation).where(Conversation.id == conversation_id).with_for_update()
+            )
+            if (
+                conversation is None
+                or conversation.tenant_id != tenant_id
+                or conversation.user_id != user_id
+            ):
+                raise ConversationAccessError("Conversation was not found.")
+            active_job = session.scalar(
+                select(InferenceJob.id).where(
+                    InferenceJob.conversation_id == conversation_id,
+                    InferenceJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                )
+            )
+            if active_job is not None:
+                raise ConversationBusyError(
+                    "A conversation with an active request cannot be deleted."
+                )
+            session.delete(conversation)
 
     def request_cancel(self, job_id: uuid.UUID, tenant_id: uuid.UUID, user_id: uuid.UUID) -> bool:
         with self.session_factory.begin() as session:
@@ -544,6 +610,20 @@ class AsyncApplicationRepository:
     async def list_conversations(self, tenant_id, user_id, offset, limit):
         return await api_blocking_io.call(
             self.repository.list_conversations, tenant_id, user_id, offset, limit
+        )
+
+    async def update_conversation(self, conversation_id, tenant_id, user_id, **changes):
+        return await api_blocking_io.call(
+            self.repository.update_conversation,
+            conversation_id,
+            tenant_id,
+            user_id,
+            **changes,
+        )
+
+    async def delete_conversation(self, conversation_id, tenant_id, user_id):
+        return await api_blocking_io.call(
+            self.repository.delete_conversation, conversation_id, tenant_id, user_id
         )
 
     async def request_cancel(self, job_id, tenant_id, user_id):

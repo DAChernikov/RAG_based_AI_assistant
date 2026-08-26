@@ -1,6 +1,6 @@
 # ADR-002: Self-hosted HTTP model serving
 
-- Status: Accepted
+- Status: Accepted; default model amended by ADR-013
 - Date: 2026-07-30
 
 ## Context

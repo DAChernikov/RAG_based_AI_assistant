@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     min_confident_doc_score: float = 0.45
 
     model_api_base_url: str = "http://127.0.0.1:11434/v1"
-    generation_model: str = "qwen2.5-coder:7b"
+    generation_model: str = "qwen2.5-coder:14b"
     model_api_token: str | None = None
     model_request_timeout: float = 90.0
     model_retries: int = 3

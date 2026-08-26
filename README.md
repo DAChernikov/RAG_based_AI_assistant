@@ -12,7 +12,7 @@ PostgreSQL с pgvector — единственный system of record. Redis Stre
 
 Требуются Docker/Compose, 12 ГБ RAM для CPU embedding-профиля и нативный Ollama/llama.cpp для macOS. Модели не скачиваются при build или startup API.
 
-Подготовьте `qwen2.5-coder:7b` в нативном Ollama/llama.cpp, затем используйте один UI-first запуск:
+Подготовьте `qwen2.5-coder:14b` в нативном Ollama/llama.cpp, затем используйте один UI-first запуск:
 
 ```bash
 ./scripts/dev-up
@@ -51,8 +51,8 @@ unset BOOTSTRAP_ADMIN_PASSWORD
 
 ## Использование
 
-- Web UI: chat с knowledge base или режимом «Без базы знаний», resumable SSE, history/citations/feedback, Guide для пользователя/администратора, светлая/тёмная темы и tenant admin operations.
-- Admin UI: service dashboard, Ollama/self-hosted model endpoints, инструкции моделям, typed Connections с подробными hints и сборка knowledge base из нескольких источников. Credentials вводятся в нужной форме, шифруются и не возвращаются браузеру.
+- Web UI: chat с knowledge base или режимом «Без базы знаний», resumable SSE, продолжение диалога, переименование/закрепление/удаление conversations, citations/feedback, Guide, светлая/тёмная темы и tenant admin operations.
+- Admin UI: service dashboard, автоматические статусы Ollama/self-hosted endpoints и выбор установленной Ollama-модели из списка, инструкции моделям, typed Connections с подробными hints и сборка knowledge base из нескольких источников. Credentials вводятся в нужной форме, шифруются и не возвращаются браузеру.
 - HTTP: `/ask`, `/ask/stream`, `/v1/inference-jobs/**`, `/v1/conversations/**`; OpenAPI — `/docs`.
 - Telegram: в Admin UI создайте token/API-key credential references и включите bot. Процесс постоянно работает в безопасном idle state и применяет новую config version без rebuild.
 - Public: `/health`; sanitized `/ready`. `/metrics` и `/admin/runtime` должны быть доступны только из trusted network/reverse proxy; runtime endpoint дополнительно admin-only.
@@ -74,12 +74,12 @@ Standard tests используют fake deterministic HTTP models/site/Git и �
 
 Репозиторий предоставляет deployment artifacts и воспроизводимые проверки, но не утверждает, что ваше production-окружение уже развёрнуто.
 
-1. **Выберите topology.** Для одного Linux host используйте hardened Compose и внешний либо локальный pgvector/Redis. Для managed Kubernetes используйте Helm. Generation/embedding endpoints могут быть на том же GPU host либо выделенных узлах. Минимум для CPU smoke: 4 CPU/12 ГБ RAM/40 ГБ; рекомендуемо: 8 CPU/32 ГБ/100 ГБ; generation GPU: 12–16 ГБ VRAM для Qwen2.5-Coder-7B Q4, с запасом под concurrency. Подробности: [single host](docs/deployment/single-host.md), [Kubernetes](docs/deployment/kubernetes.md).
+1. **Выберите topology.** Для одного Linux host используйте hardened Compose и внешний либо локальный pgvector/Redis. Для managed Kubernetes используйте Helm. Generation/embedding endpoints могут быть на том же GPU host либо выделенных узлах. Минимум для CPU smoke: 4 CPU/12 ГБ RAM/40 ГБ; рекомендуемо: 8 CPU/32 ГБ/100 ГБ; generation GPU: 16–24 ГБ VRAM для default Qwen2.5-Coder-14B Q4 с запасом под context и concurrency. Подробности: [single host](docs/deployment/single-host.md), [Kubernetes](docs/deployment/kubernetes.md).
 2. **Подготовьте платформу.** Нужны Docker/Compose или Kubernetes/Helm, DNS, TLS, PostgreSQL 16+ с pgvector, Redis 7+ и заранее подготовленные self-hosted model weights. S3 нужен только при включённом read-only model cache; SMTP не используется.
 3. **DNS/TLS.** Создайте A/AAAA/CNAME на reverse proxy/Ingress, подключите существующий сертификат либо ACME/cert-manager, включите HTTPS redirect и renewal. Установите secure cookies, exact CORS origins и trusted proxy CIDRs. PostgreSQL/Redis не публикуйте в интернет.
 4. **Создайте secrets вне репозитория.** Сгенерируйте `JWT_SECRET` (`openssl rand -base64 48`), DB/Redis passwords; добавьте connector, Telegram, optional model/S3 credentials только в Docker/Kubernetes/External Secrets. Не помещайте значения в Git, image, Helm values, command history или logs. Порядок ротации: [secrets rotation](docs/operations/secrets-rotation.md).
 5. **Подготовьте PostgreSQL/Redis.** Создайте отдельную БД и least-privilege application user, включите `vector`, TLS и bounded pool. Выполните migrations отдельным one-shot job. Для Redis включите auth/TLS, AOF/RDB по требованиям, `noeviction`; Streams имеют bounded maxlen, а durable state остаётся в PostgreSQL. Neon demo JDBC source не является готовым production application DB profile.
-6. **Подготовьте модельное железо.** Заранее загрузите и проверьте Qwen2.5-Coder-7B и BGE-M3 на CPU, Apple MPS или NVIDIA CUDA host. Настройте OpenAI-compatible endpoints, health/readiness, token, concurrency/memory limits. API не скачивает weights. При outage readiness деградирует, новые jobs ограниченно retry и затем уходят в durable failed/DLQ state.
+6. **Подготовьте модельное железо.** Заранее загрузите и проверьте default `qwen2.5-coder:14b` и BGE-M3 на CPU, Apple MPS или NVIDIA CUDA host. Настройте OpenAI-compatible endpoints, health/readiness, token, concurrency/memory limits. API не скачивает weights. При outage readiness деградирует, а Admin UI показывает установленные в Ollama альтернативы; новые jobs ограниченно retry и затем уходят в durable failed/DLQ state.
 7. **Заполните production configuration.** Скопируйте `.env.production.example` в защищённое secret/config хранилище, замените все placeholders, установите `APP_ENV=production`, `AUTH_DISABLED=false`, HTTPS origins и service URLs. До запуска выполните `poetry run python -m app.state.validate_config` с этим окружением, затем `docker compose --env-file <protected-file> config --quiet` или `helm template`; preflight выводит только имена ошибочных полей и приложение fail closed на слабом JWT, insecure cookie/CORS, disabled auth и небезопасные DB/Redis/model endpoints.
 8. **Single host.** Получите проверенный release/tag, задайте `*_IMAGE` как immutable `repository@sha256:digest`, выполните `pull` и запускайте с `--no-build` и `compose.production.yml`. Создайте backup/model-cache volumes, установите secrets, запустите DB/Redis, затем one-shot migration job, model services и application services. Откройте ограниченное bootstrap-окно через файл Docker Secret и создайте первого tenant/admin в HTTPS UI; CLI остаётся incident fallback. Проверьте `/health`, `/ready`, Web UI, затем Website/Git ingestion → indexing → grounded chat и optional Telegram. Установите restart policy и host monitoring. Полные команды — в [single-host runbook](docs/deployment/single-host.md).
 9. **Kubernetes.** Создайте namespace, Secrets/ExternalSecrets и production values; проверьте Helm render. Запустите migration Job до Deployments, настройте Ingress/TLS/PVC, probes, resources, HPA/PDB и NetworkPolicies. Проверьте rollout/smoke; rollback выполняйте `helm rollback`, учитывая совместимость schema. См. [Kubernetes runbook](docs/deployment/kubernetes.md).

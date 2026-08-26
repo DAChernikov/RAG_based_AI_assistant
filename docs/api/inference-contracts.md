@@ -41,3 +41,8 @@ there is no in-process direct generation path.
 All inference endpoints require either a JWT access token or a scoped API key. Tenant and user
 identifiers come exclusively from the authenticated principal. A client without credentials
 receives HTTP 401; access to another user's job, conversation or SSE stream is HTTP 404.
+
+Conversation management uses `PATCH /v1/conversations/{id}` with `title` and/or `pinned`, and
+`DELETE /v1/conversations/{id}`. Pinned conversations sort before recent unpinned conversations.
+Deletion is rejected with HTTP 409 while a queued or running inference job still references the
+conversation; cross-tenant and cross-user identifiers return HTTP 404.

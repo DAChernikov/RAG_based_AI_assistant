@@ -9,6 +9,7 @@ test('login shell is keyboard accessible', async ({ page }) => {
 
 test('owner flow logs in, administers a typed source, streams a cited answer and logs out', async ({ page }) => {
   const posted: string[] = []
+  let conversations = [{ conversation_id: 'history1', title: 'Черновик', pinned: false, updated_at: '2026-08-26T12:00:00Z' }]
   await page.route('**/*', async (route) => {
     const request = route.request(); const url = new URL(request.url()); const path = url.pathname
     if (!path.startsWith('/v1') && path !== '/ask/stream') return route.continue()
@@ -18,7 +19,9 @@ test('owner flow logs in, administers a typed source, streams a cited answer and
     if (path === '/v1/auth/login') return fulfill({ access_token: 'access' })
     if (path === '/v1/auth/me') return fulfill({ user_id: 'u1', tenant_id: 't1', username: 'owner', role: 'admin' })
     if (path === '/v1/knowledge-bases' || path === '/v1/admin/knowledge-bases') return fulfill([{ id: 'kb1', name: 'Product', is_enabled: true }])
-    if (path === '/v1/conversations') return fulfill([])
+    if (path === '/v1/conversations') return fulfill(conversations)
+    if (path === '/v1/conversations/history1' && request.method() === 'PATCH') { conversations = [{ ...conversations[0], ...request.postDataJSON() }]; return fulfill(conversations[0]) }
+    if (path === '/v1/conversations/history1' && request.method() === 'DELETE') { conversations = []; return route.fulfill({ status: 204, body: '' }) }
     if (path === '/v1/admin/knowledge-sources' && request.method() === 'POST') return fulfill({ id: 'source1' }, 201)
     if (path === '/v1/admin/knowledge-sources') return fulfill([])
     if (path === '/v1/admin/users' || path === '/v1/api-keys') return fulfill([])
@@ -30,6 +33,9 @@ test('owner flow logs in, administers a typed source, streams a cited answer and
   await page.goto('/')
   await page.getByLabel('Логин').fill('owner'); await page.getByLabel('Пароль').fill('owner-password'); await page.getByRole('button', { name: 'Войти' }).click()
   await expect(page.getByRole('heading', { name: 'Ассистент' })).toBeVisible()
+  await page.getByRole('button', { name: 'Действия с диалогом Черновик' }).click(); await page.getByRole('menuitem', { name: 'Переименовать' }).click(); await page.getByLabel('Новое название диалога').fill('Закреплённый чат'); await page.getByRole('button', { name: 'Сохранить' }).click()
+  await page.getByRole('button', { name: 'Действия с диалогом Закреплённый чат' }).click(); await page.getByRole('menuitem', { name: 'Закрепить' }).click(); await expect(page.getByLabel('Закреплён')).toBeVisible()
+  page.once('dialog', (dialog) => dialog.accept()); await page.getByRole('button', { name: 'Действия с диалогом Закреплённый чат' }).click(); await page.getByRole('menuitem', { name: 'Удалить' }).click(); await expect(page.getByText('Здесь появятся диалоги')).toBeVisible()
   await page.getByRole('button', { name: 'Администрирование' }).click(); await page.getByRole('button', { name: 'Подключения' }).click()
   const sourceForm = page.locator('form').filter({ has: page.getByRole('button', { name: 'Сохранить подключение' }) })
   await sourceForm.locator('input[name=name]').fill('Local docs'); await sourceForm.getByLabel('Root URL').fill('https://docs.local'); await sourceForm.getByLabel('Разрешённые hosts').fill('docs.local'); await sourceForm.getByRole('button', { name: 'Сохранить подключение' }).click()

@@ -2,8 +2,8 @@ export type Principal = { user_id: string; tenant_id: string; username: string; 
 export type KnowledgeBase = { id: string; name: string; description?: string; is_enabled: boolean }
 export type Citation = { doc_id: string; source: string; title?: string; uri?: string; score: number; metadata: Record<string, unknown> }
 export type AskResult = { question: string; answer: string; mode: string; confidence?: Record<string, unknown>; retrieved: Citation[] }
-export type Conversation = { conversation_id: string; title?: string; updated_at: string }
-export type ConversationDetail = { conversation_id: string; title?: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> }
+export type Conversation = { conversation_id: string; title?: string; pinned: boolean; updated_at: string }
+export type ConversationDetail = { conversation_id: string; title?: string; pinned: boolean; messages: Array<{ role: 'user' | 'assistant'; content: string }> }
 export type JobStatus = { job_id: string; conversation_id: string; status: string; answer?: { answer_id: string } }
 export type User = { id: string; username: string; display_name: string; role: 'admin' | 'user'; is_active: boolean; created_at: string }
 export type ApiKey = { id: string; name: string; prefix: string; scopes: string[]; expires_at?: string; last_used_at?: string; revoked_at?: string; api_key?: string }
@@ -110,7 +110,8 @@ export class ApiClient {
   async streamAsk(
     question: string,
     knowledgeBaseId: string | undefined,
-    onEvent: (event: { type: string; data: unknown; job_id?: string }) => void,
+    conversationId: string | undefined,
+    onEvent: (event: { type: string; data: unknown; job_id?: string; conversation_id?: string }) => void,
     signal: AbortSignal,
   ): Promise<void> {
     const idempotencyKey = crypto.randomUUID()
@@ -126,6 +127,7 @@ export class ApiClient {
         body: JSON.stringify({
           question,
           knowledge_base_id: knowledgeBaseId || null,
+          conversation_id: conversationId || null,
           mode: knowledgeBaseId ? null : 'model',
         }),
       })
@@ -143,7 +145,7 @@ export class ApiClient {
           if (id) lastEventId = id
           const data = raw.split('\n').find((line) => line.startsWith('data: '))?.slice(6)
           if (data) {
-            const parsed = JSON.parse(data) as { type: string; data: unknown; job_id?: string }
+            const parsed = JSON.parse(data) as { type: string; data: unknown; job_id?: string; conversation_id?: string }
             onEvent(parsed)
             terminal ||= ['done', 'completed', 'failed'].includes(parsed.type)
           }

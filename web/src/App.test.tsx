@@ -116,8 +116,74 @@ test('model-only chat streams without a knowledge base and Guide remains availab
   fireEvent.change(await screen.findByLabelText('Вопрос'), { target: { value: 'Привет' } })
   fireEvent.click(screen.getByRole('button', { name: 'Отправить' }))
   expect(await screen.findByText('Привет!')).toBeVisible()
-  expect(JSON.parse(askBody)).toEqual({ question: 'Привет', knowledge_base_id: null, mode: 'model' })
+  expect(JSON.parse(askBody)).toEqual({ question: 'Привет', knowledge_base_id: null, conversation_id: null, mode: 'model' })
   fireEvent.click(screen.getByRole('button', { name: 'Guide' }))
   expect(await screen.findByRole('heading', { name: 'Как пользоваться ассистентом' })).toBeVisible()
   expect(screen.getByText('Без базы знаний')).toBeVisible()
+})
+
+test('conversation history supports rename, pin and delete actions', async () => {
+  let conversations = [{ conversation_id: 'c1', title: 'Старое название', pinned: false, updated_at: '2026-08-26T12:00:00Z' }]
+  vi.stubGlobal('confirm', vi.fn(() => true))
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const path = String(input)
+    if (path.endsWith('/v1/setup/status')) return json({ required: false, setup_available: false, token_required: false, current_step: 'complete', onboarding_complete: true, config_version: 1 })
+    if (path.endsWith('/v1/auth/login')) return json({ access_token: 'access' })
+    if (path.endsWith('/v1/auth/me')) return json({ user_id: 'u1', tenant_id: 't1', username: 'alice', role: 'user' })
+    if (path.endsWith('/v1/knowledge-bases')) return json([])
+    if (path.endsWith('/v1/conversations') && init?.method !== 'DELETE') return json(conversations)
+    if (path.endsWith('/v1/conversations/c1') && init?.method === 'PATCH') {
+      conversations = [{ ...conversations[0], ...JSON.parse(String(init.body)) }]
+      return json(conversations[0])
+    }
+    if (path.endsWith('/v1/conversations/c1') && init?.method === 'DELETE') {
+      conversations = []
+      return Promise.resolve(new Response(null, { status: 204 }))
+    }
+    return json([])
+  })
+  render(<App />)
+  fireEvent.change(await screen.findByLabelText('Логин'), { target: { value: 'alice' } })
+  fireEvent.change(screen.getByLabelText('Пароль'), { target: { value: 'a-long-password' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Войти' }))
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Действия с диалогом Старое название' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Переименовать' }))
+  fireEvent.change(screen.getByLabelText('Новое название диалога'), { target: { value: 'Рабочий чат' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }))
+  expect(await screen.findByText('Рабочий чат')).toBeVisible()
+
+  fireEvent.click(screen.getByRole('button', { name: 'Действия с диалогом Рабочий чат' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Закрепить' }))
+  await waitFor(() => expect(screen.getByLabelText('Закреплён')).toBeVisible())
+
+  fireEvent.click(screen.getByRole('button', { name: 'Действия с диалогом Рабочий чат' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Удалить' }))
+  expect(await screen.findByText('Здесь появятся диалоги')).toBeVisible()
+})
+
+test('model administration automatically shows Ollama availability and installed choices', async () => {
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const path = String(input)
+    if (path.endsWith('/v1/setup/status')) return json({ required: false, setup_available: false, token_required: false, current_step: 'complete', onboarding_complete: true, config_version: 1 })
+    if (path.endsWith('/v1/auth/login')) return json({ access_token: 'access' })
+    if (path.endsWith('/v1/auth/me')) return json({ user_id: 'u1', tenant_id: 't1', username: 'admin', role: 'admin' })
+    if (path.endsWith('/v1/admin/models')) return json([{ id: 'm1', role: 'generation', model_id: 'qwen2.5-coder:7b', version: '1', endpoint_ref: 'endpoint:generation', base_url: 'http://ollama:11434/v1', credential_ref: null, capabilities: { provider: 'ollama' }, is_active: true }])
+    if (path.endsWith('/v1/admin/models/m1/test')) return json({ status: 'model_missing' })
+    if (path.endsWith('/v1/admin/models/m1/ollama/models')) return json([{ name: 'qwen2.5-coder:14b', size: 9_000_000_000 }, { name: 'qwen3:8b', size: 5_000_000_000 }])
+    if (path.endsWith('/v1/knowledge-bases') || path.endsWith('/v1/conversations')) return json([])
+    if (path.includes('/v1/admin/') && init?.method === 'GET') return json([])
+    return json([])
+  })
+  render(<App />)
+  fireEvent.change(await screen.findByLabelText('Логин'), { target: { value: 'admin' } })
+  fireEvent.change(screen.getByLabelText('Пароль'), { target: { value: 'a-long-password' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Войти' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Администрирование' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Модели' }))
+
+  expect(await screen.findByText('не установлена')).toBeVisible()
+  const installedSelect = screen.getByLabelText('Установленная Ollama-модель')
+  expect(installedSelect).toHaveValue('qwen2.5-coder:14b')
+  expect(screen.getAllByRole('option', { name: /qwen3:8b/ }).length).toBeGreaterThan(0)
 })

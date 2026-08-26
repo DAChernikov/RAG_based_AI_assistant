@@ -12,7 +12,7 @@ from app.api.routes.ask import _submit_queued
 from app.api.schemas import AskRequest, InferenceJobAccepted, InferenceJobStatusResponse
 from app.auth.security import Principal
 from app.inference.application import serialize_job
-from app.state.repositories import ConversationAccessError
+from app.state.repositories import ConversationAccessError, ConversationBusyError
 
 router = APIRouter(prefix="/v1", tags=["inference"])
 
@@ -20,6 +20,11 @@ router = APIRouter(prefix="/v1", tags=["inference"])
 class FeedbackRequest(BaseModel):
     rating: int = Field(ge=-1, le=1)
     comment: str | None = Field(default=None, max_length=1000)
+
+
+class ConversationUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    pinned: bool | None = None
 
 
 async def _audit_not_found(
@@ -137,6 +142,52 @@ async def conversations(
     return await runtime["repository"].list_conversations(
         principal.tenant_id, principal.user_id, offset, limit
     )
+
+
+@router.patch("/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: uuid.UUID,
+    payload: ConversationUpdate,
+    request: Request,
+    principal: Principal = Depends(require_scope("inference:write")),
+    runtime: dict = Depends(get_runtime_state),
+):
+    changes = payload.model_dump(exclude_unset=True)
+    if "title" in changes:
+        title = changes["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise HTTPException(status_code=422, detail="Conversation title cannot be empty.")
+        changes["title"] = title.strip()
+    if not changes:
+        raise HTTPException(status_code=422, detail="No conversation changes were provided.")
+    try:
+        return await runtime["repository"].update_conversation(
+            conversation_id,
+            principal.tenant_id,
+            principal.user_id,
+            **changes,
+        )
+    except ConversationAccessError as exc:
+        await _audit_not_found(request, runtime, principal, "conversation", conversation_id)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_scope("inference:write")),
+    runtime: dict = Depends(get_runtime_state),
+):
+    try:
+        await runtime["repository"].delete_conversation(
+            conversation_id, principal.tenant_id, principal.user_id
+        )
+    except ConversationAccessError as exc:
+        await _audit_not_found(request, runtime, principal, "conversation", conversation_id)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConversationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/inference-jobs/{job_id}/cancel", status_code=202)

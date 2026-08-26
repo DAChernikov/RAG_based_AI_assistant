@@ -116,9 +116,22 @@ legend { padding: 0 .45rem; color: var(--accent-strong); font-weight: 750; }
 .conversation-list { position: sticky; top: 1.25rem; min-height: 520px; padding-right: 1rem; border-right: 1px solid var(--border-soft); }
 .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: .7rem; }
 .section-title span { min-width: 1.8rem; padding: .15rem .45rem; border-radius: 99px; background: var(--surface-2); color: var(--text-muted); text-align: center; font-size: .72rem; }
-.conversation-item { width: 100%; display: grid; gap: .22rem; margin: .2rem 0; padding: .7rem; background: transparent; color: var(--text); text-align: left; font-weight: 600; }
+.new-conversation { width: 100%; margin-bottom: .55rem; padding: .58rem .7rem; text-align: left; }
+.conversation-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: .2rem 0; border: 1px solid transparent; border-radius: 11px; }
+.conversation-row:hover, .conversation-row.active { background: var(--surface-hover); }
+.conversation-row.active { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.conversation-item { width: 100%; min-width: 0; display: grid; gap: .22rem; padding: .7rem; background: transparent; color: var(--text); text-align: left; font-weight: 600; }
 .conversation-item:hover { background: var(--surface-hover); }
+.conversation-item > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-item small { color: var(--text-muted); font-size: .7rem; font-weight: 450; }
+.conversation-more { align-self: stretch; padding: .35rem .5rem; color: var(--text-muted); }
+.conversation-actions { position: absolute; z-index: 6; top: calc(100% - .25rem); right: .2rem; width: 155px; display: grid; gap: .15rem; padding: .35rem; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow); }
+.conversation-actions button { width: 100%; text-align: left; }
+.conversation-rename { grid-column: 1 / -1; display: grid; gap: .45rem; padding: .55rem; }
+.conversation-rename input { padding: .55rem .6rem; }
+.conversation-rename div { display: flex; gap: .3rem; }
+.conversation-rename button { padding: .4rem .55rem; font-size: .72rem; }
+.pin { margin-right: .35rem; color: var(--accent-strong); font-size: .65rem; }
 .chat-column { width: min(880px, 100%); min-width: 0; margin: 0 auto; }
 .messages { min-height: 52vh; display: flex; flex-direction: column; gap: 1.1rem; align-items: stretch; }
 .chat-empty { margin: auto; padding: 4rem 1rem; text-align: center; color: var(--text-muted); }
@@ -184,6 +197,8 @@ legend { padding: 0 .45rem; color: var(--accent-strong); font-weight: 750; }
 .model-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .55rem; margin: .8rem 0; }
 .model-chips article { display: grid; gap: .35rem; padding: .75rem; border: 1px solid var(--border); border-radius: 10px; }
 .model-chips small { color: var(--text-muted); }
+.ollama-catalog { margin-top: 1.15rem; padding-top: 1rem; border-top: 1px solid var(--border-soft); }
+.inline-model-select { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; align-items: center; }
 .instruction-list { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: 1rem; }
 .instruction-list span { padding: .4rem .65rem; border-radius: 99px; background: var(--surface-2); color: var(--text-muted); font-size: .73rem; }
 .instruction-list span.configured { background: var(--accent-soft); color: var(--accent-strong); }
@@ -229,6 +244,7 @@ legend { padding: 0 .45rem; color: var(--accent-strong); font-weight: 750; }
   .chat-layout { grid-template-columns: 1fr; }
   .conversation-list { position: static; min-height: auto; display: flex; gap: .4rem; overflow-x: auto; padding: 0 0 .7rem; border: 0; }
   .conversation-list .section-title, .conversation-list .empty-copy { display: none; }
+  .conversation-row { min-width: 190px; }
   .conversation-item { width: auto; min-width: 150px; }
   .guide-layout { grid-template-columns: 1fr; }
   .guide-note { position: static; }
@@ -236,6 +252,7 @@ legend { padding: 0 .45rem; color: var(--accent-strong); font-weight: 750; }
 @media (max-width: 580px) {
   .workspace { padding: 1rem; }
   .form-grid, .inline-form { grid-template-columns: 1fr; }
+  .inline-model-select { grid-template-columns: 1fr; }
   .form-grid > * { grid-column: 1; }
   .message.user { width: 92%; }
   .table-list article, .status-row, .panel-heading { align-items: stretch; flex-direction: column; }

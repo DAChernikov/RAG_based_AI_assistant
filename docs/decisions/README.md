@@ -12,3 +12,4 @@
 - ADR-010 — final self-hosted runtime
 - ADR-011 — React Web UI and browser session model
 - ADR-012 — UI-first bootstrap and encrypted credential references
+- ADR-013 — Ollama model discovery and Qwen2.5-Coder-14B local default

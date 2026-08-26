@@ -26,7 +26,7 @@ botImage:
 config:
   appEnv: production
   modelApiBaseUrl: https://generation.internal.example.invalid/v1
-  generationModel: qwen2.5-coder-7b-instruct
+  generationModel: qwen2.5-coder:14b
   embeddingApiBaseUrl: http://rag-assistant-embedding:8001/v1
   corsAllowedOrigins: https://assistant.example.invalid
 existingSecret: rag-assistant-secrets

@@ -132,7 +132,17 @@ class FakeRepository:
         return [{"conversation_id": str(self.job.conversation_id), "title": "Question"}]
 
     async def conversation_history(self, *_args):
-        return {"conversation_id": str(self.job.conversation_id), "messages": []}
+        return {"conversation_id": str(self.job.conversation_id), "pinned": False, "messages": []}
+
+    async def update_conversation(self, conversation_id, *_args, **changes):
+        return {
+            "conversation_id": str(conversation_id),
+            "title": changes.get("title"),
+            "pinned": changes.get("pinned", False),
+        }
+
+    async def delete_conversation(self, *_args):
+        self.deleted = True
 
     async def request_cancel(self, *_args):
         return self.cancelled
@@ -154,6 +164,17 @@ class FakeEventQueue:
                 payload=CompletedPayload(answer="done", mode="rag_docs"),
             ),
         )
+
+
+def test_stream_events_expose_conversation_id_for_immediate_follow_up():
+    application = FakeQueuedApplication()
+    runtime = queued_runtime(application)
+    runtime["queue"] = FakeEventQueue()
+
+    response = build_client(runtime).post("/ask/stream", json={"question": "queued"})
+
+    assert response.status_code == 200
+    assert f'"conversation_id": "{application.conversation_id}"' in response.text
 
 
 def detailed_runtime(status="completed"):
@@ -191,6 +212,18 @@ def test_job_status_history_events_cancel_feedback_and_negative_cases():
     assert stream.status_code == 200 and "event: completed" in stream.text
     assert client.get("/v1/conversations").json()[0]["title"] == "Question"
     assert client.get(f"/v1/conversations/{job.conversation_id}").status_code == 200
+    renamed = client.patch(
+        f"/v1/conversations/{job.conversation_id}", json={"title": "Renamed", "pinned": True}
+    )
+    assert renamed.json()["title"] == "Renamed"
+    assert renamed.json()["pinned"] is True
+    assert client.patch(f"/v1/conversations/{job.conversation_id}", json={}).status_code == 422
+    assert (
+        client.patch(f"/v1/conversations/{job.conversation_id}", json={"title": None}).status_code
+        == 422
+    )
+    assert client.delete(f"/v1/conversations/{job.conversation_id}").status_code == 204
+    assert runtime["repository"].deleted is True
     assert client.post(f"/v1/inference-jobs/{job.id}/cancel").json()["cancel_requested"]
     feedback = client.post(
         f"/v1/answers/{uuid.uuid4()}/feedback", json={"rating": 1, "comment": "good"}

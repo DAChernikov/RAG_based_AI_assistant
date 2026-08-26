@@ -4,7 +4,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.state.models import Answer, Base, InferenceJob, Tenant, User
-from app.state.repositories import ApplicationRepository, IdempotencyConflictError
+from app.state.repositories import (
+    ApplicationRepository,
+    ConversationAccessError,
+    ConversationBusyError,
+    IdempotencyConflictError,
+)
 
 
 @pytest.fixture
@@ -59,11 +64,59 @@ def test_repository_persists_job_answer_sources_and_conversation(repository):
 
     assert stored.status == "completed"
     assert stored.answer.answer_text.startswith("Spark")
+    assert history["title"] == "What is Spark?"
     assert len(stored.answer.sources) == 1
     assert [message["role"] for message in history["messages"]] == ["user", "assistant"]
     with factory() as session:
         assert session.query(InferenceJob).count() == 1
         assert session.query(Answer).count() == 1
+
+
+def test_conversation_rename_pin_delete_and_owner_isolation(repository):
+    repo, factory, (tenant_id, user_id) = repository
+    first = repo.create_job(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        question="First conversation",
+        request_payload={"question": "First conversation"},
+        contract_version="1.0",
+        max_attempts=3,
+    )
+    with pytest.raises(ConversationBusyError):
+        repo.delete_conversation(first.job.conversation_id, tenant_id, user_id)
+
+    repo.complete_job(
+        first.job.id,
+        result={"answer": "done", "mode": "model", "retrieved": []},
+        model_name="fake",
+    )
+    updated = repo.update_conversation(
+        first.job.conversation_id,
+        tenant_id,
+        user_id,
+        title="Pinned conversation",
+        pinned=True,
+    )
+    assert updated["title"] == "Pinned conversation"
+    assert updated["pinned"] is True
+    assert repo.list_conversations(tenant_id, user_id, 0, 10)[0]["pinned"] is True
+
+    with factory.begin() as session:
+        other = User(
+            tenant_id=tenant_id,
+            username="other-user",
+            display_name="Other User",
+        )
+        session.add(other)
+        session.flush()
+        other_id = other.id
+    with pytest.raises(ConversationAccessError):
+        repo.update_conversation(first.job.conversation_id, tenant_id, other_id, title="stolen")
+    with pytest.raises(ConversationAccessError):
+        repo.delete_conversation(first.job.conversation_id, tenant_id, other_id)
+
+    repo.delete_conversation(first.job.conversation_id, tenant_id, user_id)
+    assert repo.list_conversations(tenant_id, user_id, 0, 10) == []
 
 
 def test_idempotency_reuses_same_payload_and_rejects_conflict(repository):

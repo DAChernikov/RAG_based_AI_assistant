@@ -53,7 +53,16 @@ class User(TimestampMixin, Base):
 
 class Conversation(TimestampMixin, Base):
     __tablename__ = "conversations"
-    __table_args__ = (Index("ix_conversations_tenant_created", "tenant_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_conversations_tenant_created", "tenant_id", "created_at"),
+        Index(
+            "ix_conversations_owner_pinned_updated",
+            "tenant_id",
+            "user_id",
+            "pinned",
+            "updated_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -63,6 +72,7 @@ class Conversation(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     title: Mapped[str | None] = mapped_column(String(255))
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     next_message_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 

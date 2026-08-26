@@ -151,7 +151,13 @@ async def ask_stream(
                         payload_data = data["payload"]["text"]
                     elif event.event_type == "completed":
                         payload_data = data["payload"]["answer"]
-                    data.update({"type": legacy_type, "data": payload_data})
+                    data.update(
+                        {
+                            "type": legacy_type,
+                            "data": payload_data,
+                            "conversation_id": str(creation.job.conversation_id),
+                        }
+                    )
                     yield (
                         f"id: {redis_id}\n"
                         f"event: {event.event_type}\n"
