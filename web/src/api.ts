@@ -57,9 +57,9 @@ export class ApiClient {
     return response.json() as Promise<T>
   }
 
-  async login(tenant_slug: string, username: string, password: string): Promise<Principal> {
+  async login(username: string, password: string): Promise<Principal> {
     const tokens = await this.request<{ access_token: string }>('/v1/auth/login', {
-      method: 'POST', body: JSON.stringify({ tenant_slug, username, password, use_cookie: true }),
+      method: 'POST', body: JSON.stringify({ username, password, use_cookie: true }),
     })
     this.accessToken = tokens.access_token
     return this.me()

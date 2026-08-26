@@ -46,21 +46,29 @@ class AuthService:
         )
 
     async def login(
-        self, tenant_slug: str, username: str, password: str, correlation_id: uuid.UUID
+        self,
+        tenant_slug: str | None,
+        username: str,
+        password: str,
+        correlation_id: uuid.UUID,
     ) -> dict:
-        rate_key = f"{tenant_slug}:{username}"
+        rate_key = f"{tenant_slug or 'automatic'}:{username}"
         await self.rate_limiter.check(rate_key)
-        user = await self._call(self.repository.find_user_for_login, tenant_slug, username)
-        if (
-            user is None
-            or not user.is_active
-            or not user.password_hash
-            or not self.passwords.verify(user.password_hash, password)
-        ):
+        candidates = await self._call(self.repository.find_users_for_login, tenant_slug, username)
+        matches = [
+            candidate
+            for candidate in candidates
+            if candidate.is_active
+            and candidate.password_hash
+            and self.passwords.verify(candidate.password_hash, password)
+        ]
+        user = matches[0] if len(matches) == 1 else None
+        if user is None:
+            audited_user = candidates[0] if len(candidates) == 1 else None
             await self._call(
                 self.repository.audit,
-                tenant_id=user.tenant_id if user else None,
-                actor_user_id=user.id if user else None,
+                tenant_id=audited_user.tenant_id if audited_user else None,
+                actor_user_id=audited_user.id if audited_user else None,
                 action="auth.login",
                 outcome="failure",
                 correlation_id=correlation_id,

@@ -39,9 +39,10 @@ function Login({ onLogin }: { onLogin: (principal: Principal) => void }) {
     setError('')
     const values = new FormData(event.currentTarget)
     try {
-      onLogin(await api.login(String(values.get('tenant')), String(values.get('username')), String(values.get('password'))))
+      onLogin(await api.login(String(values.get('username')), String(values.get('password'))))
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось войти')
+      const message = reason instanceof Error ? reason.message : 'Не удалось войти'
+      setError(message === 'Invalid credentials.' ? 'Неверный логин или пароль.' : message)
     } finally {
       setBusy(false)
     }
@@ -49,7 +50,6 @@ function Login({ onLogin }: { onLogin: (principal: Principal) => void }) {
   return <main className="login-shell"><form className="card login" onSubmit={submit}>
     <div className="logo-mark" aria-hidden="true">R</div><p className="eyebrow">PRIVATE AI WORKSPACE</p><h1>RAG Assistant</h1>
     <p className="muted">Документация, код и схемы данных — в одном защищённом пространстве.</p>
-    <label>Tenant<input name="tenant" autoComplete="organization" required /></label>
     <label>Логин<input name="username" autoComplete="username" required /></label>
     <label>Пароль<input name="password" type="password" autoComplete="current-password" required /></label>
     {error && <p className="error" role="alert">{error}</p>}
@@ -174,7 +174,7 @@ function Profile({ principal, onLogout }: { principal: Principal; onLogout: () =
       setNotice(reason instanceof Error ? reason.message : 'Пароль не изменён.')
     }
   }
-  return <section className="workspace profile-page"><header className="page-header"><div><p className="eyebrow">ACCOUNT</p><h1>Профиль</h1><p className="lead">Настройки вашей учётной записи.</p></div></header><div className="admin-grid"><section className="card"><div className="profile-hero"><span className="avatar large">{principal.username.slice(0, 1).toUpperCase()}</span><div><h2>{principal.username}</h2><p className="muted">{principal.role === 'admin' ? 'Администратор' : 'Пользователь'} · tenant {principal.tenant_id.slice(0, 8)}</p></div></div><button className="secondary" onClick={onLogout}>Выйти из аккаунта</button></section><section className="card"><h2>Сменить пароль</h2><form className="form-grid" onSubmit={changePassword}><label>Текущий пароль<input name="current_password" type="password" autoComplete="current-password" required /></label><label>Новый пароль<input name="new_password" type="password" minLength={12} autoComplete="new-password" required /></label><label>Повторите новый пароль<input name="confirm_password" type="password" minLength={12} autoComplete="new-password" required /></label><button>Обновить пароль</button>{notice && <p className="notice" role="status">{notice}</p>}</form></section></div></section>
+  return <section className="workspace profile-page"><header className="page-header"><div><p className="eyebrow">ACCOUNT</p><h1>Профиль</h1><p className="lead">Настройки вашей учётной записи.</p></div></header><div className="admin-grid"><section className="card"><div className="profile-hero"><span className="avatar large">{principal.username.slice(0, 1).toUpperCase()}</span><div><h2>{principal.username}</h2><p className="muted">{principal.role === 'admin' ? 'Администратор' : 'Пользователь'}</p></div></div><button className="secondary" onClick={onLogout}>Выйти из аккаунта</button></section><section className="card"><h2>Сменить пароль</h2><form className="form-grid" onSubmit={changePassword}><label>Текущий пароль<input name="current_password" type="password" autoComplete="current-password" required /></label><label>Новый пароль<input name="new_password" type="password" minLength={12} autoComplete="new-password" required /></label><label>Повторите новый пароль<input name="confirm_password" type="password" minLength={12} autoComplete="new-password" required /></label><button>Обновить пароль</button>{notice && <p className="notice" role="status">{notice}</p>}</form></section></div></section>
 }
 
 export function App() {

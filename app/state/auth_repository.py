@@ -18,13 +18,14 @@ class AuthRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
 
-    def find_user_for_login(self, tenant_slug: str, username: str) -> User | None:
+    def find_users_for_login(self, tenant_slug: str | None, username: str) -> list[User]:
         with self.session_factory() as session:
-            return session.scalar(
-                select(User)
-                .join(Tenant, Tenant.id == User.tenant_id)
-                .where(Tenant.slug == tenant_slug, User.username == username)
-            )
+            statement = select(User).where(User.username == username)
+            if tenant_slug is not None:
+                statement = statement.join(Tenant, Tenant.id == User.tenant_id).where(
+                    Tenant.slug == tenant_slug
+                )
+            return list(session.scalars(statement))
 
     def get_active_user(self, tenant_id: uuid.UUID, user_id: uuid.UUID) -> User | None:
         with self.session_factory() as session:

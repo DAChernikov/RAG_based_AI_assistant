@@ -103,6 +103,27 @@ async def test_login_refresh_rotation_logout_and_reuse_detection(auth_context):
 
 
 @pytest.mark.asyncio
+async def test_login_resolves_tenant_from_credentials_and_rejects_ambiguity(auth_context):
+    service, _, factory, admin, _, outsider = auth_context
+    correlation_id = uuid.uuid4()
+
+    admin_tokens = await service.login(None, "admin", "admin-password-123", correlation_id)
+    assert (
+        await service.authenticate_access_token(admin_tokens["access_token"])
+    ).tenant_id == admin.tenant_id
+
+    outsider_tokens = await service.login(None, "alice", "other-password-123", correlation_id)
+    assert (
+        await service.authenticate_access_token(outsider_tokens["access_token"])
+    ).tenant_id == outsider.tenant_id
+
+    with factory.begin() as session:
+        session.get(User, outsider.id).password_hash = service.passwords.hash("alice-password-123")
+    with pytest.raises(AuthenticationError, match="Invalid credentials"):
+        await service.login(None, "alice", "alice-password-123", correlation_id)
+
+
+@pytest.mark.asyncio
 async def test_wrong_password_rate_limit_and_expired_refresh(auth_context):
     service, repository, _, _, user, _ = auth_context
     correlation_id = uuid.uuid4()
@@ -193,7 +214,6 @@ def test_auth_endpoints_admin_permissions_and_api_key(auth_context):
     admin_login = client.post(
         "/v1/auth/login",
         json={
-            "tenant_slug": "tenant-a",
             "username": "admin",
             "password": "admin-password-123",
         },

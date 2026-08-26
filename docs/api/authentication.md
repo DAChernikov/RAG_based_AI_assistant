@@ -4,9 +4,12 @@ Status: implemented product contract.
 
 ## Sessions
 
-- `POST /v1/auth/login` accepts `tenant_slug`, `username`, `password` and returns a short-lived
+- `POST /v1/auth/login` accepts `username` and `password` and returns a short-lived
   Bearer access token plus an opaque refresh token for non-browser clients. Browser mode stores
   refresh in an HttpOnly cookie and uses a CSRF cookie/header pair.
+  The tenant is resolved from the authenticated account and is never requested in the login UI.
+  `tenant_slug` remains an optional compatibility discriminator for non-browser clients with
+  duplicate usernames; ambiguous credentials fail closed with HTTP 401.
 - `POST /v1/auth/refresh` consumes and rotates a refresh token. Reuse, expiry or revocation
   returns HTTP 401 and revokes the token family when it can be identified.
 - `POST /v1/auth/logout` revokes the supplied refresh session.
@@ -34,7 +37,7 @@ Stored records contain only SHA-256 hash, safe prefix, scopes, expiry, last-use 
 timestamps. API keys cannot be used to create or manage other keys.
 
 Login throttling uses an atomic Redis counter shared by API processes. Redis keys contain a
-hash of the tenant/username identity rather than the plaintext username.
+hash of the optional tenant discriminator and username rather than the plaintext username.
 
 ## Public and protected paths
 

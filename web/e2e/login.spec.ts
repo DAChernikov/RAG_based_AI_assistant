@@ -4,7 +4,7 @@ test('login shell is keyboard accessible', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'RAG Assistant' })).toBeVisible()
   await page.keyboard.press('Tab')
-  await expect(page.locator('input[name=tenant]')).toBeFocused()
+  await expect(page.locator('input[name=username]')).toBeFocused()
 })
 
 test('owner flow logs in, administers a typed source, streams a cited answer and logs out', async ({ page }) => {
@@ -28,7 +28,7 @@ test('owner flow logs in, administers a typed source, streams a cited answer and
     return fulfill([])
   })
   await page.goto('/')
-  await page.getByLabel('Tenant').fill('acme'); await page.getByLabel('Логин').fill('owner'); await page.getByLabel('Пароль').fill('owner-password'); await page.getByRole('button', { name: 'Войти' }).click()
+  await page.getByLabel('Логин').fill('owner'); await page.getByLabel('Пароль').fill('owner-password'); await page.getByRole('button', { name: 'Войти' }).click()
   await expect(page.getByRole('heading', { name: 'Ассистент' })).toBeVisible()
   await page.getByRole('button', { name: 'Администрирование' }).click(); await page.getByRole('button', { name: 'Подключения' }).click()
   const sourceForm = page.locator('form').filter({ has: page.getByRole('button', { name: 'Сохранить подключение' }) })
