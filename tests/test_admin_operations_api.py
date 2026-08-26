@@ -306,3 +306,47 @@ def test_ollama_catalog_and_explicit_pull_use_configured_self_hosted_endpoint():
     assert pulled.json() == {"status": "success", "model": "qwen2.5:7b"}
     assert [method for method, _, _ in observed] == ["GET", "POST"]
     assert all("/v1/api/" not in url for _, url, _ in observed)
+
+
+def test_ollama_model_test_requires_the_configured_model_to_be_installed():
+    client, runtime, _, _ = build_client()
+
+    def handler(_request: httpx.Request):
+        return httpx.Response(200, json={"models": [{"name": "qwen2.5-coder:14b"}]})
+
+    runtime["ollama_http_transport"] = httpx.MockTransport(handler)
+    missing = client.post(
+        "/v1/admin/models",
+        json={
+            "role": "generation",
+            "model_id": "qwen2.5-coder:7b",
+            "version": "1",
+            "base_url": "http://ollama.internal:11434/v1",
+            "capabilities": {"provider": "ollama"},
+        },
+    ).json()
+
+    checked = client.post(f"/v1/admin/models/{missing['id']}/test")
+
+    assert checked.status_code == 200
+    assert checked.json() == {
+        "status": "model_missing",
+        "model_id": "qwen2.5-coder:7b",
+        "version": "1",
+        "message": "The configured model is not installed in Ollama.",
+    }
+    refused = client.post(f"/v1/admin/models/{missing['id']}/activate")
+    assert refused.status_code == 409
+
+    installed = client.post(
+        "/v1/admin/models",
+        json={
+            "role": "generation",
+            "model_id": "qwen2.5-coder:14b",
+            "version": "1",
+            "base_url": "http://ollama.internal:11434/v1",
+            "capabilities": {"provider": "ollama"},
+        },
+    ).json()
+    assert client.post(f"/v1/admin/models/{installed['id']}/test").json()["status"] == "ready"
+    assert client.post(f"/v1/admin/models/{installed['id']}/activate").status_code == 200

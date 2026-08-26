@@ -296,6 +296,22 @@ async def test_model(
             principal.tenant_id,
         )
     try:
+        if row.role == "generation" and (row.capabilities or {}).get("provider") == "ollama":
+            catalog = await _ollama_request(runtime, row, "GET", "/api/tags")
+            installed = {
+                item.get("name")
+                for item in catalog.get("models", [])
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            requested = row.model_id
+            aliases = {requested, f"{requested}:latest"} if ":" not in requested else {requested}
+            if installed.isdisjoint(aliases):
+                return {
+                    "status": "model_missing",
+                    "model_id": row.model_id,
+                    "version": row.version,
+                    "message": "The configured model is not installed in Ollama.",
+                }
         if row.role == "generation":
             client = await api_blocking_io.call(
                 runtime["runtime_registry"].generation_client, resolved
@@ -331,7 +347,11 @@ async def test_model(
     status = (
         "ready"
         if ready
-        else "model_loading" if state in {"loading", "model_loading"} else "unavailable"
+        else (
+            "model_loading"
+            if state in {"loading", "model_loading"}
+            else "model_missing" if state == "model_missing" else "unavailable"
+        )
     )
     return {
         "status": status,
@@ -347,6 +367,18 @@ async def activate_model(
     principal: Principal = Depends(require_admin),
     runtime=Depends(get_runtime_state),
 ):
+    row = await runtime["catalog_service"].call(
+        runtime["operations_repository"].get_model, model_id
+    )
+    if row is None or row.tenant_id != principal.tenant_id:
+        raise HTTPException(status_code=404, detail="Model definition was not found.")
+    if row.role == "generation":
+        check = await test_model(model_id, principal, runtime)
+        if check.get("status") != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail="The generation model must pass its connection test before activation.",
+            )
     try:
         row = await runtime["catalog_service"].call(
             runtime["operations_repository"].activate_model, principal.tenant_id, model_id

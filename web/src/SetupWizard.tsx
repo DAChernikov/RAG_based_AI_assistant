@@ -98,11 +98,17 @@ export function SetupWizard({ initial, principal, onAuthenticated, onComplete }:
             )
 
             const checked = await api.mutate<{
-                status: 'ready' | 'model_loading' | 'unavailable'
+                status: 'ready' | 'model_loading' | 'model_missing' | 'unavailable'
             }>(
                 `/v1/admin/models/${created.id}/test`,
                 'POST',
             )
+
+            if (checked.status === 'model_missing') {
+                throw new Error(
+                    `${role}: модель «${String(data.get(`${role}_model`))}» не установлена. Установите её в Ollama или укажите установленный Model ID.`,
+                )
+            }
 
             if (checked.status === 'unavailable') {
                 throw new Error(

@@ -10,7 +10,11 @@ from datetime import UTC, datetime
 from pydantic import ValidationError
 
 from app.api.config import settings
-from app.api.services.llm_service import LLMRateLimitError, LLMTemporaryUnavailableError
+from app.api.services.llm_service import (
+    LLMModelUnavailableError,
+    LLMRateLimitError,
+    LLMTemporaryUnavailableError,
+)
 from app.concurrency import BoundedThreadAdapter
 from app.inference.contracts import (
     CompletedEvent,
@@ -224,6 +228,14 @@ class InferenceWorker:
                 metric("retries")
             else:
                 await self._terminal_failure(message_id, contract, "retry_exhausted", lease_token)
+        except LLMModelUnavailableError as exc:
+            await self._terminal_failure(
+                message_id,
+                contract,
+                "model_unavailable",
+                lease_token,
+                message=str(exc),
+            )
         except JobCancelledError:
             await self.blocking_io.call(
                 self.repository.mark_cancelled, contract.job_id, lease_token
@@ -264,8 +276,15 @@ class InferenceWorker:
             if not renewed:
                 return
 
-    async def _terminal_failure(self, message_id, contract, code: str, lease_token=None) -> None:
-        message = "Inference job failed. See worker logs using the correlation ID."
+    async def _terminal_failure(
+        self,
+        message_id,
+        contract,
+        code: str,
+        lease_token=None,
+        *,
+        message: str = "Inference job failed. See worker logs using the correlation ID.",
+    ) -> None:
         if not await self.blocking_io.call(
             self.repository.mark_failed, contract.job_id, code, message, lease_token
         ):

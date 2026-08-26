@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app.api.services.llm_service import (
+    LLMModelUnavailableError,
     LLMRateLimitError,
     LLMTemporaryUnavailableError,
     OpenAICompatibleLLMService,
@@ -71,6 +72,43 @@ async def test_generate_adds_bearer_token_when_configured():
         await service.generate(prompt="prompt", max_new_tokens=10)
 
     assert captured_headers[0]["Authorization"] == "Bearer local-secret"
+
+
+@pytest.mark.asyncio
+async def test_generate_maps_missing_model_without_exposing_provider_response():
+    service = OpenAICompatibleLLMService(
+        api_base_url="http://model.test/v1",
+        model="missing-model",
+        retries=0,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                404,
+                json={"error": "provider detail that must not reach the user"},
+            )
+        ),
+    )
+
+    with pytest.raises(LLMModelUnavailableError) as raised:
+        async with service:
+            await service.generate(prompt="prompt", max_new_tokens=10)
+
+    assert "Администрирование → Модели" in str(raised.value)
+    assert "provider detail" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_stream_generate_maps_missing_model_to_configuration_error():
+    service = OpenAICompatibleLLMService(
+        api_base_url="http://model.test/v1",
+        model="missing-model",
+        retries=0,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(404)),
+    )
+
+    with pytest.raises(LLMModelUnavailableError):
+        async with service:
+            async for _chunk in service.stream_generate(prompt="prompt", max_new_tokens=10):
+                pass
 
 
 @pytest.mark.asyncio
@@ -291,7 +329,14 @@ async def test_injected_http_client_is_supported_and_caller_owned():
 @pytest.mark.parametrize(
     ("response", "expected"),
     [
-        (httpx.Response(200, json={"data": []}), {"ready": True, "status": "available"}),
+        (
+            httpx.Response(200, json={"data": [{"id": "local-model"}]}),
+            {"ready": True, "status": "available"},
+        ),
+        (
+            httpx.Response(200, json={"data": [{"id": "another-model"}]}),
+            {"ready": False, "status": "model_missing"},
+        ),
         (httpx.Response(404), {"ready": False, "status": "unsupported"}),
     ],
 )

@@ -30,6 +30,19 @@ class LLMTemporaryUnavailableError(RuntimeError):
         super().__init__(message)
 
 
+class LLMModelUnavailableError(RuntimeError):
+    """The configured model is not available from the selected model server."""
+
+    def __init__(
+        self,
+        message: str = (
+            "Активная модель генерации недоступна. Выберите установленную модель "
+            "в разделе «Администрирование → Модели» или установите выбранную модель."
+        ),
+    ):
+        super().__init__(message)
+
+
 class OpenAICompatibleLLMService:
     """Async client for a self-hosted OpenAI-compatible chat completions API."""
 
@@ -102,6 +115,18 @@ class OpenAICompatibleLLMService:
         if response.status_code >= 500:
             return {"ready": False, "status": "unavailable"}
         if response.is_success:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                available = {
+                    item.get("id")
+                    for item in payload["data"]
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }
+                if self.model not in available:
+                    return {"ready": False, "status": "model_missing"}
             return {"ready": True, "status": "available"}
         return {"ready": False, "status": "error"}
 
@@ -143,6 +168,9 @@ class OpenAICompatibleLLMService:
 
         if response.status_code in cls.TEMPORARY_UNAVAILABLE_STATUSES:
             raise LLMTemporaryUnavailableError()
+
+        if response.status_code == 404:
+            raise LLMModelUnavailableError()
 
         response.raise_for_status()
 

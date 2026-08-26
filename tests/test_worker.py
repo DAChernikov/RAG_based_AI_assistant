@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.services.llm_service import LLMTemporaryUnavailableError
+from app.api.services.llm_service import LLMModelUnavailableError, LLMTemporaryUnavailableError
 from app.inference.contracts import InferenceJobContract
 from app.state.models import Answer, Base, Tenant, User
 from app.state.repositories import ApplicationRepository
@@ -55,6 +55,11 @@ class FakeProcessor:
         await emit("meta", {"mode": "rag_docs", "confidence": None, "retrieved": []})
         await emit("token", {"text": "answer"})
         return {"answer": "answer", "mode": "rag_docs", "retrieved": []}
+
+
+class MissingModelProcessor:
+    async def execute(self, contract, emit):
+        raise LLMModelUnavailableError()
 
 
 @pytest.fixture
@@ -178,6 +183,23 @@ async def test_worker_terminal_failure_is_sanitized_and_sent_to_dlq(worker_conte
     assert job.error_message == "Inference job failed. See worker logs using the correlation ID."
     assert queue.dlq[0]["error_code"] == "inference_failed"
     assert "unsafe internal detail" not in queue.dlq[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_worker_reports_missing_active_model_without_retry(worker_context):
+    repository, _, identity = worker_context
+    contract = create_contract(repository, identity)
+    queue = FakeQueue()
+    worker = InferenceWorker(repository, queue, MissingModelProcessor())
+
+    await worker.process_message("1-0", {"contract": contract.model_dump_json()})
+
+    job = repository.get_job(contract.job_id)
+    assert job.status == "failed"
+    assert job.error_code == "model_unavailable"
+    assert "Администрирование → Модели" in job.error_message
+    assert queue.enqueued == []
+    assert queue.dlq[0]["error_code"] == "model_unavailable"
 
 
 @pytest.mark.asyncio
